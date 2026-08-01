@@ -1,0 +1,5 @@
+// TaskbarStudio application icon resource
+// ID 1 is the application's main icon (used by Explorer, taskbar, etc.)
+#include <windows.h>
+
+1 ICON "app.ico"
