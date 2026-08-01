@@ -3,3 +3,6 @@
 #include <windows.h>
 
 1 ICON "app.ico"
+
+// PawnIO RyzenSMU blob (AMD PM Table 读取，嵌入 EXE 免外部文件)
+200 BLOB "RyzenSMU.bin"

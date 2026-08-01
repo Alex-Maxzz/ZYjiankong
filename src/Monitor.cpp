@@ -2,6 +2,7 @@
 #include "pch.h"
 #include "Monitor.h"
 #include "NvApi.h"
+#include "PawnIo.h"
 
 Monitor& Monitor::Instance() {
     static Monitor inst;
@@ -19,6 +20,9 @@ bool Monitor::Start() {
 
     // 在主线程初始化 NVAPI（不需要 COM）
     NvApi::Instance().Init();
+
+    // PawnIO 初始化（需管理员权限，失败静默降级到 HTTP/WMI）
+    PawnIo::Instance().Init();
 
     // WMI 在采集线程内初始化（COM 单线程亲和）
     m_thread = std::thread([this]() {
@@ -68,6 +72,7 @@ bool Monitor::Start() {
 void Monitor::Stop() {
     if (!m_running.exchange(false)) return;
     if (m_thread.joinable()) m_thread.join();
+    PawnIo::Instance().Shutdown();
 }
 
 SystemMetrics Monitor::GetSnapshot() const {
@@ -166,10 +171,11 @@ void Monitor::CollectCpuUsage() {
 }
 
 // ============== CPU 温度 ==============
-// 三层降级：
-//   1) LibreHardwareMonitor HTTP API（精确 Tctl/Tdie，需 LHM 后台运行）
-//   2) MSAcpi_ThermalZoneTemperature WMI（Intel 平台）
-//   3) ThermalZoneInformation 性能计数器（ACPI 热区，精度较低）
+// 四层降级：
+//   1) PawnIO 直读 AMD SMU PM Table（精确 Tctl/Tdie，需管理员权限）
+//   2) LibreHardwareMonitor HTTP API（需 LHM 后台运行）
+//   3) MSAcpi_ThermalZoneTemperature WMI（Intel 平台）
+//   4) ThermalZoneInformation 性能计数器（ACPI 热区，精度较低）
 //   均失败时保持 -1（界面不显示）
 
 // 从 LHM JSON 中提取 CPU 温度（简单字符串搜索，无需 JSON 库）
@@ -242,10 +248,17 @@ static float FetchLhmTemperature() {
 void Monitor::CollectCpuTemp() {
     float temp = -1.0f;
 
-    // 方案 1：LibreHardwareMonitor HTTP API（精确 AMD Tctl/Tdie）
-    temp = FetchLhmTemperature();
+    // 方案 1：PawnIO 直读 AMD SMU PM Table（精确 Tctl/Tdie，需管理员）
+    if (PawnIo::Instance().IsAvailable()) {
+        temp = PawnIo::Instance().ReadCpuTemperature();
+    }
 
-    // 方案 2：MSAcpi_ThermalZoneTemperature（Intel 常见）
+    // 方案 2：LibreHardwareMonitor HTTP API（备选，需 LHM 后台运行）
+    if (temp < 0) {
+        temp = FetchLhmTemperature();
+    }
+
+    // 方案 3：MSAcpi_ThermalZoneTemperature（Intel 常见）
     if (temp < 0) {
         IEnumWbemClassObject* pEnum = nullptr;
         if (WmiExecuteQuery(L"SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature", &pEnum)) {
@@ -267,7 +280,7 @@ void Monitor::CollectCpuTemp() {
         }
     }
 
-    // 方案 3：ThermalZoneInformation 性能计数器（ACPI 热区）
+    // 方案 4：ThermalZoneInformation 性能计数器（ACPI 热区）
     if (temp < 0 && m_wmiServicesCimv2) {
         IEnumWbemClassObject* pEnum2 = nullptr;
         HRESULT hr = m_wmiServicesCimv2->ExecQuery(
