@@ -20,6 +20,7 @@ add_executable(${PROJECT_NAME} WIN32
     src/main.cpp
     src/Monitor.cpp
     src/NvApi.cpp
+    src/PawnIo.cpp
     src/OverlayWindow.cpp
     src/AppConfig.cpp
     src/FullscreenDetect.cpp
@@ -29,7 +30,7 @@ add_executable(${PROJECT_NAME} WIN32
 # Windows 库
 target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d11 d2d1 dwrite dcomp dxgi
-    dwmapi iphlpapi
+    dwmapi iphlpapi winhttp
     ole32 oleaut32 wbemuuid
     user32 gdi32 shell32 comctl32
 )
