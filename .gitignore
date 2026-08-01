@@ -1,0 +1,22 @@
+# Build outputs
+build/
+dist/
+
+# Compiled objects
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.res
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+CMakeSettings.json
+
+# OS
+Thumbs.db
+Desktop.ini
