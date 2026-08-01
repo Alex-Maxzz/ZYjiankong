@@ -44,13 +44,13 @@ bool Monitor::Start() {
 
             // 快指标（轻量，1s）
             CollectCpuUsage();
+            CollectCpuTemp();   // PawnIO 读 PM Table = 内存拷贝，微秒级
             CollectMemory();
             CollectNetwork();
 
-            // 慢指标（WMI 较重，5s）
+            // 慢指标（WMI/NVAPI 较重，5s）
             if (now - m_prevSlowTime >= std::chrono::seconds(5)) {
                 m_prevSlowTime = now;
-                CollectCpuTemp();
                 CollectGpu();
             }
 
