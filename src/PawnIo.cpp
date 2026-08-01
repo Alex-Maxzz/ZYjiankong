@@ -141,9 +141,9 @@ float PawnIo::ReadCpuTemperature() {
 
     // PM Table 格式：每个 ULONG64 包含两个 float32（低 32 位 + 高 32 位）
     // Phoenix (7840H) PM Table v0x4C0009:
-    //   [244].lo = Tctl/Tdie 实时温度（实测验证，与 LHM 读数一致）
+    //   [286].lo = Tctl/Tdie 实时温度（关联验证：与 LHM 读数差 <1°C）
     //   [0].lo = 80.0 是静态温度限制值，不是实时温度！
-    static constexpr int kTctlIndex = 244;
+    static constexpr int kTctlIndex = 286;
 
     float temp;
     uint32_t lowBits = static_cast<uint32_t>(m_pmTable[kTctlIndex] & 0xFFFFFFFF);
