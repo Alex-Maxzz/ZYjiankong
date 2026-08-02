@@ -141,6 +141,7 @@ private:
     ID2D1SolidColorBrush*   m_brushNetDown{nullptr};    // 网络下行色
     ID2D1SolidColorBrush*   m_brushSeparator{nullptr};  // 分隔符半透明
     ID2D1SolidColorBrush*   m_brushTempHot{nullptr};    // 高温红
+    ID2D1Layer*             m_opLayer{nullptr};          // 透明度 Layer（复用）
 
     // DirectComposition
     IDCompositionDevice*    m_dcompDevice{nullptr};

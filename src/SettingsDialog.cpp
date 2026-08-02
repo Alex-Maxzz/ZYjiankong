@@ -59,10 +59,51 @@ static bool g_drag = false;
 static int g_dragId = 0;
 static ID2D1Bitmap* g_hueRing = nullptr;  // 色盘位图
 
+// 预创建复用画刷（避免每帧 Create/Release 导致内存增长）
+static ID2D1SolidColorBrush* g_brWhite = nullptr;
+static ID2D1SolidColorBrush* g_brBlack = nullptr;
+static ID2D1SolidColorBrush* g_brTmp = nullptr;  // 通用临时画刷（SetColor 复用）
+
 // 字体列表
 static std::vector<std::wstring> g_fonts;
 static int g_fontScroll = 0;
 static bool g_fontListOpen = false;
+static float g_wheelCX = 0, g_wheelCY = 0;  // 色盘中心（渲染时记录）
+static float g_brightX = 0, g_brightY = 0, g_brightH = 0;  // 明度条位置
+static float g_curHue = 0.0f, g_curVal = 1.0f;  // 当前色相(0~1)和明度(0~1)
+
+// HSV→RGB（S=1 固定满饱和），返回 0xAARRGGBB
+static uint32_t HSVtoRGB(float h, float v) {
+    float h6 = h * 6.f; int hi = (int)h6 % 6; float f = h6 - (int)h6;
+    float p = v * (1.f);  // S=1, so p=v*(1-s)=0, but we keep v for brightness
+    float r, g, b;
+    switch (hi) {
+        case 0: r=v; g=v*f; b=0; break;
+        case 1: r=v*(1-f); g=v; b=0; break;
+        case 2: r=0; g=v; b=v*f; break;
+        case 3: r=0; g=v*(1-f); b=v; break;
+        case 4: r=v*f; g=0; b=v; break;
+        default: r=v; g=0; b=v*(1-f); break;
+    }
+    return 0xFF000000 | ((uint32_t)(r*255)<<16) | ((uint32_t)(g*255)<<8) | (uint32_t)(b*255);
+}
+// 从 RGB 提取色相 (0~1)
+static float RGBtoHue(uint32_t rgb) {
+    float r = ((rgb>>16)&0xFF)/255.f, g = ((rgb>>8)&0xFF)/255.f, b = (rgb&0xFF)/255.f;
+    float mx = std::max({r,g,b}), mn = std::min({r,g,b});
+    if (mx == mn) return 0;
+    float d = mx - mn;
+    float h;
+    if (mx == r) h = (g-b)/d + (g<b?6:0);
+    else if (mx == g) h = (b-r)/d + 2;
+    else h = (r-g)/d + 4;
+    return h / 6.f;
+}
+// 从 RGB 提取明度 (0~1)
+static float RGBtoVal(uint32_t rgb) {
+    float r = ((rgb>>16)&0xFF)/255.f, g = ((rgb>>8)&0xFF)/255.f, b = (rgb&0xFF)/255.f;
+    return std::max({r,g,b});
+}
 
 // Hit zones
 struct Zone { int id; float x, y, w, h; };
@@ -73,16 +114,16 @@ static D2D1_COLOR_F C(uint32_t a) {
     return D2D1::ColorF(((a>>16)&0xFF)/255.f, ((a>>8)&0xFF)/255.f, (a&0xFF)/255.f, ((a>>24)&0xFF)/255.f);
 }
 static void RR(float x, float y, float w, float h, float r, uint32_t fill, uint32_t stroke=0) {
-    ID2D1SolidColorBrush* br; g_rt->CreateSolidColorBrush(C(fill), &br);
-    g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x,y,x+w,y+h),r,r), br);
-    if (stroke) { br->SetColor(C(stroke)); g_rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x,y,x+w,y+h),r,r), br, 1.f); }
-    br->Release();
+    if (!g_brTmp) return;
+    g_brTmp->SetColor(C(fill));
+    g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x,y,x+w,y+h),r,r), g_brTmp);
+    if (stroke) { g_brTmp->SetColor(C(stroke)); g_rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x,y,x+w,y+h),r,r), g_brTmp, 1.f); }
 }
 static void Txt(const wchar_t* s, float x, float y, uint32_t c, IDWriteTextFormat* f=nullptr) {
     if (!f) f = g_f12;
-    ID2D1SolidColorBrush* br; g_rt->CreateSolidColorBrush(C(c), &br);
-    g_rt->DrawTextW(s, (UINT32)wcslen(s), f, D2D1::RectF(x,y,x+400,y+24), br);
-    br->Release();
+    if (!g_brTmp) return;
+    g_brTmp->SetColor(C(c));
+    g_rt->DrawTextW(s, (UINT32)wcslen(s), f, D2D1::RectF(x,y,x+400,y+24), g_brTmp);
 }
 static void Zone2(int id, float x, float y, float w, float h) { g_zones.push_back({id,x,y,w,h}); }
 static int Hit(float mx, float my) {
@@ -94,18 +135,18 @@ static int Hit(float mx, float my) {
 // ===================== 控件 =====================
 static void Toggle(float x, float y, bool on, int id) {
     RR(x, y, 40, 22, 11, on ? T::kTogOn : T::kTogOff);
-    ID2D1SolidColorBrush* br; g_rt->CreateSolidColorBrush(C(0xFFFFFFFF), &br);
-    float cx = on ? x+29 : x+11;
-    g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, y+11), 8, 8), br);
-    br->Release();
+    if (g_brWhite) {
+        float cx = on ? x+29 : x+11;
+        g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, y+11), 8, 8), g_brWhite);
+    }
     Zone2(id, x-4, y-4, 48, 30);
 }
 static void Swatch(float x, float y, float sz, uint32_t color, bool sel, int id) {
     RR(x, y, sz, sz, 5, color, sel ? T::kAccent : T::kBorder);
-    if (sel) {
-        ID2D1SolidColorBrush* br; g_rt->CreateSolidColorBrush(C(T::kAccent), &br);
+    if (sel && g_brTmp) {
+        g_brTmp->SetColor(C(T::kAccent));
         D2D1_ROUNDED_RECT r2 = D2D1::RoundedRect(D2D1::RectF(x-2,y-2,x+sz+2,y+sz+2), 7, 7);
-        g_rt->DrawRoundedRectangle(&r2, br, 2.f); br->Release();
+        g_rt->DrawRoundedRectangle(&r2, g_brTmp, 2.f);
     }
     Zone2(id, x-3, y-3, sz+6, sz+6);
 }
@@ -113,9 +154,9 @@ static void Slider(float x, float y, float w, float pct, uint32_t fillC, int id)
     if (pct<0) pct=0; if (pct>1) pct=1;
     RR(x, y+5, w, 6, 3, T::kTrack);
     if (pct > 0.02f) RR(x, y+5, pct*w, 6, 3, fillC);
-    ID2D1SolidColorBrush* br; g_rt->CreateSolidColorBrush(C(0xFFFFFFFF), &br);
-    g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x+pct*w, y+8), 7, 7), br);
-    br->Release();
+    if (g_brWhite) {
+        g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x+pct*w, y+8), 7, 7), g_brWhite);
+    }
     Zone2(id, x-8, y-2, w+16, 20);
 }
 static void Pill(float x, float y, const wchar_t* label, bool sel, int id) {
@@ -182,9 +223,19 @@ static void DrawColorWheel(float x, float y) {
         g_rt->DrawBitmap(g_hueRing, D2D1::RectF(x, y, x+130, y+130));
     }
     // 中心暗圆
-    ID2D1SolidColorBrush* br; g_rt->CreateSolidColorBrush(C(T::kBg), &br);
-    g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x+65, y+65), 38, 38), br);
-    br->Release();
+    if (g_brTmp) {
+        g_brTmp->SetColor(C(T::kBg));
+        g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x+65, y+65), 38, 38), g_brTmp);
+        // 当前色相指示器（小白点在色环上）
+        float indicR = 53;  // 色环中间半径
+        float ang = g_curHue * 2.f * 3.14159265f - 3.14159265f;
+        float ix = x + 65 + cosf(ang) * indicR;
+        float iy = y + 65 + sinf(ang) * indicR;
+        g_brTmp->SetColor(C(0xFFFFFFFF));
+        g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ix, iy), 5, 5), g_brTmp);
+        g_brTmp->SetColor(C(0xFF000000));
+        g_rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(ix, iy), 5, 5), g_brTmp, 1.5f);
+    }
     // 色环点击区域
     Zone2(320, x, y, 130, 130);
 }
@@ -202,9 +253,10 @@ static void PageShow(float y) {
         Txt(it.l, T::kPad+4, y+6, T::kText);
         Toggle(BASE_W - T::kPad - 44, y+2, it.v, it.id);
         // 分隔线
-        ID2D1SolidColorBrush* br; g_rt->CreateSolidColorBrush(C(T::kBorder), &br);
-        g_rt->DrawLine(D2D1::Point2F(T::kPad, y+T::kRowH), D2D1::Point2F((float)BASE_W-T::kPad, y+T::kRowH), br, 0.5f);
-        br->Release();
+        if (g_brTmp) {
+            g_brTmp->SetColor(C(T::kBorder));
+            g_rt->DrawLine(D2D1::Point2F(T::kPad, y+T::kRowH), D2D1::Point2F((float)BASE_W-T::kPad, y+T::kRowH), g_brTmp, 0.5f);
+        }
         y += T::kRowH;
     }
 }
@@ -220,15 +272,26 @@ static void PageLook(float y) {
     y += 36;
     // 字体列表
     if (g_fontListOpen && !g_fonts.empty()) {
-        float lh = 6 * 22.f;
+        int visRows = 8;
+        float lh = visRows * 22.f;
         RR(T::kPad, y, BASE_W-T::kPad*2, lh, 7, T::kCard, T::kBorder);
-        for (int i = 0; i < 6 && g_fontScroll+i < (int)g_fonts.size(); i++) {
+        for (int i = 0; i < visRows && g_fontScroll+i < (int)g_fonts.size(); i++) {
             int idx = g_fontScroll + i;
             float iy = y + 2 + i*22.f;
             bool sel = (g_fonts[idx] == dc.fontFamily);
-            if (sel) RR(T::kPad+3, iy, BASE_W-T::kPad*2-6, 20, 4, T::kAccentDim);
+            if (sel) RR(T::kPad+3, iy, BASE_W-T::kPad*2-16, 20, 4, T::kAccentDim);
             Txt(g_fonts[idx].c_str(), T::kPad+10, iy+2, sel ? T::kText : T::kDim, g_f11);
-            Zone2(210+idx, T::kPad+3, iy, BASE_W-T::kPad*2-6, 20);
+            Zone2(600+idx, T::kPad+3, iy, BASE_W-T::kPad*2-16, 20);
+        }
+        // 滚动条
+        int total = (int)g_fonts.size();
+        if (total > visRows) {
+            float sbX = BASE_W - T::kPad - 8;
+            float sbH = lh - 8;
+            float thumbH = sbH * visRows / total;
+            float thumbY = y + 4 + (sbH - thumbH) * g_fontScroll / (total - visRows);
+            RR(sbX, y+4, 4, sbH, 2, T::kTrack);
+            RR(sbX, thumbY, 4, thumbH, 2, T::kDim);
         }
         y += lh + 8;
     }
@@ -268,26 +331,29 @@ static void PageColor(float y) {
     // 色盘
     Txt(L"自定义颜色", T::kPad+4, y, T::kDim, g_f11); y += 20;
     DrawColorWheel(T::kPad, y);
+    g_wheelCX = T::kPad + 65; g_wheelCY = y + 65;  // 记录色盘中心
     // 明度条
     float bx = T::kPad + 145;
+    g_brightX = bx; g_brightY = y + 18; g_brightH = 100;  // 记录明度条位置
     Txt(L"明度", bx, y, T::kDim, g_f11);
-    // 明度渐变条（用多段矩形模拟）
+    // 明度渐变条：当前色相从暗(底)到亮(顶)
     for (int i = 0; i < 20; i++) {
-        float v = i / 19.f;
-        uint32_t gc = 0xFF000000 | ((uint32_t)(v*255)<<16) | ((uint32_t)(v*255)<<8) | (uint32_t)(v*255);
+        float v = 1.f - i / 19.f;  // 顶=1(亮), 底=0(暗)
+        uint32_t gc = HSVtoRGB(g_curHue, v);
         RR(bx, y+18+i*5.f, 100, 5, 0, gc);
     }
     Zone2(321, bx-4, y+16, 108, 104);
+    // 明度指示器（横线指向当前值位置）
+    {
+        float indicY = y + 18 + (1.f - g_curVal) * g_brightH;
+        if (g_brWhite) {
+            g_rt->DrawLine(D2D1::Point2F(bx+100, indicY), D2D1::Point2F(bx+108, indicY), g_brWhite, 2.f);
+        }
+    }
     // 当前色预览
     RR(bx, y+126, 36, 22, 5, dc.textColor, T::kBorder);
     Txt(L"当前色", bx+42, y+129, T::kDim, g_f11);
     y += 156;
-    // 网络色
-    Txt(L"网络上行色", T::kPad+4, y, T::kDim, g_f11); y += 20;
-    for (int i = 0; i < 6; i++) Swatch(T::kPad+i*34.f, y, 26, kNetColors[i], kNetColors[i]==dc.netUpColor, 340+i);
-    y += 34;
-    Txt(L"网络下行色", T::kPad+4, y, T::kDim, g_f11); y += 20;
-    for (int i = 0; i < 6; i++) Swatch(T::kPad+i*34.f, y, 26, kNetColors[i], kNetColors[i]==dc.netDownColor, 350+i);
 }
 
 static void PageTemp(float y) {
@@ -357,9 +423,10 @@ static void Render() {
         Zone2(900+i, tx, TITLE_H+2, tw, TAB_H-4);
     }
     // 分隔线
-    ID2D1SolidColorBrush* br; g_rt->CreateSolidColorBrush(C(T::kBorder), &br);
-    g_rt->DrawLine(D2D1::Point2F(12, (float)CONTENT_Y-4), D2D1::Point2F(BASE_W-12.f, (float)CONTENT_Y-4), br, 0.5f);
-    br->Release();
+    if (g_brTmp) {
+        g_brTmp->SetColor(C(T::kBorder));
+        g_rt->DrawLine(D2D1::Point2F(12, (float)CONTENT_Y-4), D2D1::Point2F(BASE_W-12.f, (float)CONTENT_Y-4), g_brTmp, 0.5f);
+    }
 
     // 页面
     float cy = (float)CONTENT_Y + 4;
@@ -404,16 +471,14 @@ static void Click(int id) {
         *f[id-100] = !*f[id-100]; ch = true;
     }
     // 外观
-    if (id == 200) { g_fontListOpen = !g_fontListOpen; }
-    if (id >= 210 && id < 210+(int)g_fonts.size()) { dc.fontFamily = g_fonts[id-210]; ch = true; }
+    if (id == 200) { g_fontListOpen = !g_fontListOpen; InvalidateRect(g_hwnd,nullptr,FALSE); return; }
+    if (id >= 600 && id < 600+(int)g_fonts.size()) { dc.fontFamily = g_fonts[id-600]; ch = true; }
     if (id >= 220 && id <= 222) { dc.fontSize = (id==220)?10.f:(id==221)?12.f:14.f; ch = true; }
     if (id >= 230 && id <= 232) { dc.spacingScale = (id==230)?0.8f:(id==231)?1.f:1.3f; ch = true; }
     if (id == 240) { dc.showIndicatorDots = !dc.showIndicatorDots; ch = true; }
     if (id == 241) { dc.showSeparator = !dc.showSeparator; ch = true; }
     // 颜色
-    if (id >= 300 && id < 312) { dc.textColor = kTxtColors[id-300]; ch = true; }
-    if (id >= 340 && id < 346) { dc.netUpColor = kNetColors[id-340]; ch = true; }
-    if (id >= 350 && id < 356) { dc.netDownColor = kNetColors[id-350]; ch = true; }
+    if (id >= 300 && id < 312) { dc.textColor = kTxtColors[id-300]; g_curHue = RGBtoHue(dc.textColor); g_curVal = RGBtoVal(dc.textColor); ch = true; }
     // 温度
     if (id == 400) { dc.tempColorGradient = !dc.tempColorGradient; ch = true; }
     // 网络
@@ -434,28 +499,20 @@ static void DragSlider(int id, float mx, float my) {
         case 250: dc.overlayOpacity = 0.3f + pct * 0.7f; ch = true; break;
         case 410: dc.tempLowThreshold = 30.f + pct * 40.f; ch = true; break;
         case 411: dc.tempHighThreshold = 70.f + pct * 40.f; ch = true; break;
-        case 321: { // 明度条（垂直）
-            float vy = (my - (CONTENT_Y + 238.f)) / 100.f;
+        case 321: { // 明度条（垂直）- 保持色相，只调明度
+            float vy = (my - g_brightY) / g_brightH;
             if (vy<0) vy=0; if (vy>1) vy=1;
-            uint8_t v = (uint8_t)((1.f-vy)*255);
-            dc.textColor = (dc.textColor & 0xFF000000) | ((uint32_t)v<<16) | ((uint32_t)v<<8) | v;
+            g_curVal = 1.f - vy;  // 顶部=亮(1), 底部=暗(0)
+            dc.textColor = HSVtoRGB(g_curHue, g_curVal);
             ch = true; break;
         }
-        case 320: { // 色环
-            float cx = T::kPad + 65, cy2 = (float)CONTENT_Y + 4 + 20 + 65;
-            float dx = mx - cx, dy = my - cy2;
+        case 320: { // 色环 - 选色相，保持当前明度
+            float dx = mx - g_wheelCX, dy = my - g_wheelCY;
             float dist = sqrtf(dx*dx+dy*dy);
             if (dist > 38 && dist < 65) {
                 float angle = atan2f(dy, dx);
-                float hue = (angle + 3.14159265f) / (2*3.14159265f);
-                float h6 = hue * 6.f; int hi = (int)h6 % 6; float f = h6-(int)h6;
-                float r,g,b;
-                switch(hi) {
-                    case 0: r=1;g=f;b=0; break; case 1: r=1-f;g=1;b=0; break;
-                    case 2: r=0;g=1;b=f; break; case 3: r=0;g=1-f;b=1; break;
-                    case 4: r=f;g=0;b=1; break; default: r=1;g=0;b=1-f; break;
-                }
-                dc.textColor = 0xFF000000 | ((uint32_t)(r*255)<<16) | ((uint32_t)(g*255)<<8) | (uint32_t)(b*255);
+                g_curHue = (angle + 3.14159265f) / (2*3.14159265f);
+                dc.textColor = HSVtoRGB(g_curHue, g_curVal);
                 ch = true;
             }
             break;
@@ -476,13 +533,22 @@ static int CALLBACK FontCb(const LOGFONTW* lf, const TEXTMETRICW* tm, DWORD type
 }
 static void LoadFonts() {
     g_fonts.clear();
-    const wchar_t* rec[] = {L"Inter",L"LXGW WenKai",L"Maple Mono SC",L"MiSans",L"Sarasa UI SC",L"Segoe UI",L"Microsoft YaHei"};
-    for (auto* r : rec) g_fonts.push_back(r);
-    HDC hdc = GetDC(nullptr);
-    LOGFONTW lf{}; lf.lfCharSet = DEFAULT_CHARSET;
-    EnumFontFamiliesExW(hdc, &lf, FontCb, (LPARAM)&g_fonts, 0);
-    ReleaseDC(nullptr, hdc);
-    if (g_fonts.size() > 7) std::sort(g_fonts.begin()+7, g_fonts.end());
+    // 精选字体列表（适合小字号任务栏显示，不枚举全系统）
+    const wchar_t* curated[] = {
+        // 现代无衬线
+        L"Inter", L"MiSans", L"Segoe UI", L"Segoe UI Variable",
+        L"HarmonyOS Sans SC", L"Source Han Sans SC", L"Noto Sans SC",
+        // 等宽/代码
+        L"Maple Mono SC", L"Sarasa UI SC", L"Sarasa Mono SC",
+        L"Cascadia Code", L"Cascadia Mono", L"JetBrains Mono",
+        L"Fira Code", L"Source Code Pro", L"Consolas",
+        // 中文特色
+        L"LXGW WenKai", L"Microsoft YaHei", L"微软雅黑",
+        L"Source Han Serif SC", L"LXGW Neo XiHei",
+        // 经典
+        L"Arial", L"Helvetica", L"Verdana", L"Tahoma",
+    };
+    for (auto* f : curated) g_fonts.push_back(f);
 }
 
 // ===================== 窗口过程 =====================
@@ -502,7 +568,7 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_MOUSEWHEEL: {
             if (g_fontListOpen) {
                 g_fontScroll -= GET_WHEEL_DELTA_WPARAM(wp)/120;
-                int mx2 = (int)g_fonts.size()-6; if (g_fontScroll<0) g_fontScroll=0; if (g_fontScroll>mx2) g_fontScroll=mx2;
+                int mx2 = (int)g_fonts.size()-8; if (g_fontScroll<0) g_fontScroll=0; if (g_fontScroll>mx2) g_fontScroll=mx2;
                 InvalidateRect(hw,nullptr,FALSE);
             }
             return 0;
@@ -518,6 +584,9 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_CLOSE: SettingsDialog::Close(); return 0;
         case WM_DESTROY:
+            if (g_brWhite) { g_brWhite->Release(); g_brWhite=nullptr; }
+            if (g_brBlack) { g_brBlack->Release(); g_brBlack=nullptr; }
+            if (g_brTmp)   { g_brTmp->Release();   g_brTmp=nullptr; }
             if (g_hueRing) { g_hueRing->Release(); g_hueRing=nullptr; }
             if (g_rt) { g_rt->Release(); g_rt=nullptr; }
             if (g_f12) { g_f12->Release(); g_f12=nullptr; }
@@ -567,22 +636,11 @@ void SettingsDialog::Show(HWND owner) {
         D2D1::HwndRenderTargetProperties(g_hwnd, D2D1::SizeU(rc.right,rc.bottom)), &g_rt);
     fac->Release();
 
-    // DEBUG: 输出实际尺寸到文件
-    {
-        RECT wr; GetWindowRect(g_hwnd, &wr);
-        FILE* f = fopen("C:\\Users\\15174\\.qoderworkcn\\workspace\\msas4y6m057r6xvk\\settings_debug.txt", "w");
-        if (f) {
-            fprintf(f, "dpiScale=%.2f dpi=%u\n", g_dpiScale, GetDpiForSystem());
-            fprintf(f, "WindowRect: %ldx%ld\n", wr.right-wr.left, wr.bottom-wr.top);
-            fprintf(f, "ClientRect: %ldx%ld\n", rc.right, rc.bottom);
-            fprintf(f, "KW=%d KH=%d BASE_W=%d BASE_H=%d\n", KW, KH, BASE_W, BASE_H);
-            fprintf(f, "CONTENT_Y=%d TITLE_H=%d TAB_H=%d\n", CONTENT_Y, TITLE_H, TAB_H);
-            if (g_rt) {
-                D2D1_SIZE_F sz = g_rt->GetSize();
-                fprintf(f, "RT size: %.0fx%.0f\n", sz.width, sz.height);
-            }
-            fclose(f);
-        }
+    // 初始化复用画刷（避免每帧 Create/Release 导致内存增长）
+    if (g_rt) {
+        if (!g_brWhite) g_rt->CreateSolidColorBrush(C(0xFFFFFFFF), &g_brWhite);
+        if (!g_brBlack) g_rt->CreateSolidColorBrush(C(0xFF000000), &g_brBlack);
+        if (!g_brTmp)   g_rt->CreateSolidColorBrush(C(0xFFFFFFFF), &g_brTmp);
     }
 
     // DWrite
@@ -594,6 +652,12 @@ void SettingsDialog::Show(HWND owner) {
     }
     LoadFonts();
     g_fontListOpen = false; g_fontScroll = 0;
+    // 从当前 textColor 初始化 HSV 状态
+    {
+        const DisplayConfig& dc = AppConfig::Instance().Get();
+        g_curHue = RGBtoHue(dc.textColor);
+        g_curVal = RGBtoVal(dc.textColor);
+    }
     ShowWindow(g_hwnd, SW_SHOW);
 }
 
