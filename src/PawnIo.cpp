@@ -99,20 +99,116 @@ bool PawnIo::LoadBlobFromResource() {
 }
 
 bool PawnIo::ResolvePmTable() {
+    // ioctl_get_code_name: outSize=1 → CPU 代号
+    ULONG64 codeOut[1] = {};
+    SIZE_T ret = 0;
+    HRESULT hr = m_fnExecute(m_handle, "ioctl_get_code_name", nullptr, 0, codeOut, 1, &ret);
+    if (SUCCEEDED(hr) && ret >= 1) {
+        m_cpuCodeName = static_cast<int>(codeOut[0]);
+    }
+
     // ioctl_resolve_pm_table: inSize=0, outSize=2 → [version, dramBase]
     ULONG64 out[2] = {};
-    SIZE_T ret = 0;
-    HRESULT hr = m_fnExecute(m_handle, "ioctl_resolve_pm_table", nullptr, 0, out, 2, &ret);
+    ret = 0;
+    hr = m_fnExecute(m_handle, "ioctl_resolve_pm_table", nullptr, 0, out, 2, &ret);
     if (FAILED(hr) || ret < 2) return false;
 
     m_pmTableVersion = static_cast<uint32_t>(out[0]);
     m_pmTableBase = out[1];
 
-    // 验证：版本和地址不能为 0
     if (m_pmTableVersion == 0 || m_pmTableBase == 0) return false;
 
     m_pmTableResolved = true;
+
+    // 根据 CPU 代号确定温度偏移
+    DetectTempOffset();
+
     return true;
+}
+
+// PM Table 温度偏移表：{cpuCodeName, ulong64Index, useHighBits}
+// 通过 Pearson 相关系数验证（15 样本 vs LHM）
+struct TempOffsetEntry {
+    int codeName;
+    int index;
+    bool high;
+};
+
+static const TempOffsetEntry kOffsetTable[] = {
+    // Phoenix / Lucienne (7040/7030 系列, Zen4/Zen3 笔记本)
+    // 验证: r=0.958, 偏差 -0.88°C
+    {23, 8, true},   // Lucienne (blob 对 7840H 返回 23)
+    {24, 8, true},   // Phoenix
+    {25, 8, true},   // Phoenix2
+    // Rembrandt (6000 系列, Zen3+ 笔记本)
+    {11, 8, true},   // Rembrandt (推测同结构，待验证)
+    // Raphael / GraniteRidge (7000/9000 桌面, Zen4/Zen5)
+    {17, 8, true},   // Raphael (推测，待验证)
+    {18, 8, true},   // GraniteRidge (推测，待验证)
+    // Vermeer / Cezanne (5000 桌面/笔记本, Zen3)
+    {12, 8, true},   // Vermeer (推测，待验证)
+    {14, 8, true},   // Cezanne (推测，待验证)
+};
+
+void PawnIo::DetectTempOffset() {
+    // 查表
+    for (const auto& entry : kOffsetTable) {
+        if (entry.codeName == m_cpuCodeName) {
+            m_tempIndex = entry.index;
+            m_tempHigh = entry.high;
+            return;
+        }
+    }
+
+    // 未知代号：启发式扫描（读两次 PM Table，找 30-110°C 范围内变化的值）
+    if (!UpdateAndReadPmTable()) {
+        m_tempIndex = 8;  // 默认猜测
+        m_tempHigh = true;
+        return;
+    }
+
+    // 保存第一次读数
+    ULONG64 first[kPmTableSize];
+    memcpy(first, m_pmTable, sizeof(first));
+
+    // 等 500ms 再读第二次
+    Sleep(500);
+    if (!UpdateAndReadPmTable()) {
+        m_tempIndex = 8;
+        m_tempHigh = true;
+        return;
+    }
+
+    // 找最佳候选：在温度范围内且两次读数不同
+    float bestVal = -1;
+    int bestIdx = 8;
+    bool bestHigh = true;
+    float bestDist = 999;
+
+    for (int i = 0; i < 50; i++) {  // 只扫前 50 个（温度通常在前面）
+        for (int half = 0; half < 2; half++) {
+            uint32_t raw1 = (half == 0) ? (uint32_t)(first[i] & 0xFFFFFFFF) : (uint32_t)(first[i] >> 32);
+            uint32_t raw2 = (half == 0) ? (uint32_t)(m_pmTable[i] & 0xFFFFFFFF) : (uint32_t)(m_pmTable[i] >> 32);
+            float v1, v2;
+            memcpy(&v1, &raw1, 4);
+            memcpy(&v2, &raw2, 4);
+
+            // 必须在合理温度范围，且两次有变化（排除静态值）
+            if (v1 > 30 && v1 < 110 && v1 != v2) {
+                // 优先选最接近 60°C 的（典型 CPU 工作温度）
+                float dist = fabsf(v1 - 60.0f);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestVal = v1;
+                    bestIdx = i;
+                    bestHigh = (half == 1);
+                }
+            }
+        }
+    }
+
+    m_tempIndex = bestIdx;
+    m_tempHigh = bestHigh;
 }
 
 bool PawnIo::UpdateAndReadPmTable() {
@@ -139,15 +235,14 @@ float PawnIo::ReadCpuTemperature() {
 
     if (!UpdateAndReadPmTable()) return -1.0f;
 
-    // PM Table 格式：每个 ULONG64 包含两个 float32（低 32 位 + 高 32 位）
-    // Phoenix (7840H) PM Table v0x4C0009:
-    //   [8].hi = Tctl/Tdie 实时温度
-    //   （15 样本 Pearson 相关系数 0.958，平均偏差 -0.88°C vs LHM）
-    static constexpr int kTctlIndex = 8;
-
+    // 从检测到的偏移读取温度
     float temp;
-    uint32_t highBits = static_cast<uint32_t>(m_pmTable[kTctlIndex] >> 32);
-    memcpy(&temp, &highBits, sizeof(float));
+    uint32_t bits;
+    if (m_tempHigh)
+        bits = static_cast<uint32_t>(m_pmTable[m_tempIndex] >> 32);
+    else
+        bits = static_cast<uint32_t>(m_pmTable[m_tempIndex] & 0xFFFFFFFF);
+    memcpy(&temp, &bits, sizeof(float));
 
     // 合理性校验
     if (temp > 0.0f && temp < 150.0f) return temp;
