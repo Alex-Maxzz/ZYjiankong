@@ -31,9 +31,11 @@ namespace T {
 }
 
 // ===================== 常量 =====================
-static const int KW = 440, KH = 460;
+static const int BASE_W = 440, BASE_H = 460;
 static const int TITLE_H = 38, TAB_H = 38;
-static const int CONTENT_Y = TITLE_H + TAB_H + 8;
+static int KW = 440, KH = 460;  // 实际窗口尺寸（DPI 缩放后）
+static float g_dpiScale = 1.0f;
+static int CONTENT_Y = TITLE_H + TAB_H + 8;
 
 enum Tab { TAB_SHOW, TAB_LOOK, TAB_COLOR, TAB_TEMP, TAB_NET, TAB_N };
 static const wchar_t* kTabs[] = {L"显示", L"外观", L"颜色", L"温度", L"网络"};
@@ -198,10 +200,10 @@ static void PageShow(float y) {
     };
     for (auto& it : items) {
         Txt(it.l, T::kPad+4, y+6, T::kText);
-        Toggle(KW - T::kPad - 44, y+2, it.v, it.id);
+        Toggle(BASE_W - T::kPad - 44, y+2, it.v, it.id);
         // 分隔线
         ID2D1SolidColorBrush* br; g_rt->CreateSolidColorBrush(C(T::kBorder), &br);
-        g_rt->DrawLine(D2D1::Point2F(T::kPad, y+T::kRowH), D2D1::Point2F((float)KW-T::kPad, y+T::kRowH), br, 0.5f);
+        g_rt->DrawLine(D2D1::Point2F(T::kPad, y+T::kRowH), D2D1::Point2F((float)BASE_W-T::kPad, y+T::kRowH), br, 0.5f);
         br->Release();
         y += T::kRowH;
     }
@@ -211,22 +213,22 @@ static void PageLook(float y) {
     const DisplayConfig& dc = AppConfig::Instance().Get();
     // 字体
     Txt(L"显示字体", T::kPad+4, y, T::kDim, g_f11); y += 20;
-    RR(T::kPad, y, KW-T::kPad*2, 30, 7, T::kCard, T::kBorder);
+    RR(T::kPad, y, BASE_W-T::kPad*2, 30, 7, T::kCard, T::kBorder);
     Txt(dc.fontFamily.c_str(), T::kPad+10, y+6, T::kText);
-    Txt(L"▾", KW-T::kPad-20, y+6, T::kDim);
-    Zone2(200, T::kPad, y, KW-T::kPad*2, 30);
+    Txt(L"▾", BASE_W-T::kPad-20, y+6, T::kDim);
+    Zone2(200, T::kPad, y, BASE_W-T::kPad*2, 30);
     y += 36;
     // 字体列表
     if (g_fontListOpen && !g_fonts.empty()) {
         float lh = 6 * 22.f;
-        RR(T::kPad, y, KW-T::kPad*2, lh, 7, T::kCard, T::kBorder);
+        RR(T::kPad, y, BASE_W-T::kPad*2, lh, 7, T::kCard, T::kBorder);
         for (int i = 0; i < 6 && g_fontScroll+i < (int)g_fonts.size(); i++) {
             int idx = g_fontScroll + i;
             float iy = y + 2 + i*22.f;
             bool sel = (g_fonts[idx] == dc.fontFamily);
-            if (sel) RR(T::kPad+3, iy, KW-T::kPad*2-6, 20, 4, T::kAccentDim);
+            if (sel) RR(T::kPad+3, iy, BASE_W-T::kPad*2-6, 20, 4, T::kAccentDim);
             Txt(g_fonts[idx].c_str(), T::kPad+10, iy+2, sel ? T::kText : T::kDim, g_f11);
-            Zone2(210+idx, T::kPad+3, iy, KW-T::kPad*2-6, 20);
+            Zone2(210+idx, T::kPad+3, iy, BASE_W-T::kPad*2-6, 20);
         }
         y += lh + 8;
     }
@@ -243,14 +245,14 @@ static void PageLook(float y) {
     // 透明度
     wchar_t buf[32]; swprintf_s(buf, L"整体透明度: %d%%", (int)(dc.overlayOpacity*100));
     Txt(buf, T::kPad+4, y, T::kDim, g_f11); y += 20;
-    Slider(T::kPad, y, KW-T::kPad*2, (dc.overlayOpacity-0.3f)/0.7f, T::kAccent, 250);
+    Slider(T::kPad, y, BASE_W-T::kPad*2, (dc.overlayOpacity-0.3f)/0.7f, T::kAccent, 250);
     y += 28;
     // 开关
     Txt(L"指标前彩色圆点", T::kPad+4, y+6, T::kText);
-    Toggle(KW-T::kPad-44, y+2, dc.showIndicatorDots, 240);
+    Toggle(BASE_W-T::kPad-44, y+2, dc.showIndicatorDots, 240);
     y += T::kRowH;
     Txt(L"指标间竖线分隔", T::kPad+4, y+6, T::kText);
-    Toggle(KW-T::kPad-44, y+2, dc.showSeparator, 241);
+    Toggle(BASE_W-T::kPad-44, y+2, dc.showSeparator, 241);
 }
 
 static void PageColor(float y) {
@@ -292,7 +294,7 @@ static void PageTemp(float y) {
     const DisplayConfig& dc = AppConfig::Instance().Get();
     Txt(L"温度色阶渐变", T::kPad+4, y+6, T::kText);
     Txt(L"低温绿→高温红", T::kPad+120, y+8, T::kDim, g_f11);
-    Toggle(KW-T::kPad-44, y+2, dc.tempColorGradient, 400);
+    Toggle(BASE_W-T::kPad-44, y+2, dc.tempColorGradient, 400);
     y += T::kRowH + 4;
     // 渐变条
     for (int i = 0; i < 40; i++) {
@@ -300,25 +302,25 @@ static void PageTemp(float y) {
         uint8_t r = (uint8_t)(t < 0.5f ? t*2*255 : 255);
         uint8_t g = (uint8_t)(t < 0.5f ? 200 : (1-(t-0.5f)*2)*200);
         uint32_t gc = 0xFF000000 | ((uint32_t)r<<16) | ((uint32_t)g<<8) | 0x40;
-        RR(T::kPad + i*(KW-T::kPad*2)/40.f, y, (KW-T::kPad*2)/40.f+1, 8, 0, gc);
+        RR(T::kPad + i*(BASE_W-T::kPad*2)/40.f, y, (BASE_W-T::kPad*2)/40.f+1, 8, 0, gc);
     }
     y += 18;
     // 阈值滑块
     wchar_t buf[32];
     swprintf_s(buf, L"开始变色: %.0f°C", dc.tempLowThreshold);
     Txt(buf, T::kPad+4, y, T::kDim, g_f11); y += 18;
-    Slider(T::kPad, y, KW-T::kPad*2, (dc.tempLowThreshold-30)/40.f, 0xFF34D399, 410);
+    Slider(T::kPad, y, BASE_W-T::kPad*2, (dc.tempLowThreshold-30)/40.f, 0xFF34D399, 410);
     y += 28;
     swprintf_s(buf, L"全红温度: %.0f°C", dc.tempHighThreshold);
     Txt(buf, T::kPad+4, y, T::kDim, g_f11); y += 18;
-    Slider(T::kPad, y, KW-T::kPad*2, (dc.tempHighThreshold-70)/40.f, 0xFFF87171, 411);
+    Slider(T::kPad, y, BASE_W-T::kPad*2, (dc.tempHighThreshold-70)/40.f, 0xFFF87171, 411);
 }
 
 static void PageNet(float y) {
     const DisplayConfig& dc = AppConfig::Instance().Get();
     Txt(L"上下行异色", T::kPad+4, y+6, T::kText);
     Txt(L"关闭则统一用文字色", T::kPad+100, y+8, T::kDim, g_f11);
-    Toggle(KW-T::kPad-44, y+2, dc.netColorSplit, 500);
+    Toggle(BASE_W-T::kPad-44, y+2, dc.netColorSplit, 500);
     y += T::kRowH + 8;
     Txt(L"上行颜色", T::kPad+4, y, T::kDim, g_f11); y += 20;
     for (int i = 0; i < 6; i++) Swatch(T::kPad+i*34.f, y, 26, kNetColors[i], kNetColors[i]==dc.netUpColor, 510+i);
@@ -334,17 +336,19 @@ static void Render() {
     g_rt->BeginDraw();
     g_rt->Clear(C(T::kBg));
     g_rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    // DPI 缩放：所有坐标按 96 DPI 设计，统一缩放
+    g_rt->SetTransform(D2D1::Matrix3x2F::Scale(g_dpiScale, g_dpiScale));
 
     // 标题栏
-    RR(0, 0, (float)KW, (float)TITLE_H, 0, T::kTitle);
+    RR(0, 0, (float)BASE_W, (float)TITLE_H, 0, T::kTitle);
     Txt(L"TaskbarStudio 设置", 14, 10, T::kText, g_f13);
     // 关闭按钮
-    RR(KW-36, 6, 26, 26, 6, 0x00000000);
-    Txt(L"✕", KW-30, 10, T::kDim);
-    Zone2(999, KW-36, 6, 26, 26);
+    RR(BASE_W-36, 6, 26, 26, 6, 0x00000000);
+    Txt(L"✕", BASE_W-30, 10, T::kDim);
+    Zone2(999, BASE_W-36, 6, 26, 26);
 
     // Tab 栏
-    float tw = (KW - 24.f) / TAB_N;
+    float tw = (BASE_W - 24.f) / TAB_N;
     for (int i = 0; i < TAB_N; i++) {
         float tx = 12 + i*tw;
         if (i == g_tab) RR(tx+2, TITLE_H+5, tw-4, TAB_H-10, 7, T::kAccent);
@@ -354,7 +358,7 @@ static void Render() {
     }
     // 分隔线
     ID2D1SolidColorBrush* br; g_rt->CreateSolidColorBrush(C(T::kBorder), &br);
-    g_rt->DrawLine(D2D1::Point2F(12, (float)CONTENT_Y-4), D2D1::Point2F(KW-12.f, (float)CONTENT_Y-4), br, 0.5f);
+    g_rt->DrawLine(D2D1::Point2F(12, (float)CONTENT_Y-4), D2D1::Point2F(BASE_W-12.f, (float)CONTENT_Y-4), br, 0.5f);
     br->Release();
 
     // 页面
@@ -423,7 +427,7 @@ static void Click(int id) {
 static void DragSlider(int id, float mx, float my) {
     DisplayConfig dc = AppConfig::Instance().Get();
     bool ch = false;
-    float x0 = T::kPad, w = KW - T::kPad*2;
+    float x0 = T::kPad, w = BASE_W - T::kPad*2;
     float pct = (mx - x0) / w;
     if (pct<0) pct=0; if (pct>1) pct=1;
     switch (id) {
@@ -486,14 +490,14 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_PAINT: { PAINTSTRUCT ps; BeginPaint(hw,&ps); Render(); EndPaint(hw,&ps); return 0; }
         case WM_LBUTTONDOWN: {
-            float mx=(float)LOWORD(lp), my=(float)HIWORD(lp);
+            float mx=(float)LOWORD(lp)/g_dpiScale, my=(float)HIWORD(lp)/g_dpiScale;
             int id = Hit(mx, my);
             if (id==250||id==410||id==411||id==320||id==321) {
                 g_drag=true; g_dragId=id; SetCapture(hw); DragSlider(id,mx,my);
             } else if (id>=0) Click(id);
             return 0;
         }
-        case WM_MOUSEMOVE: { if (g_drag) DragSlider(g_dragId, (float)LOWORD(lp), (float)HIWORD(lp)); return 0; }
+        case WM_MOUSEMOVE: { if (g_drag) DragSlider(g_dragId, (float)LOWORD(lp)/g_dpiScale, (float)HIWORD(lp)/g_dpiScale); return 0; }
         case WM_LBUTTONUP: { if (g_drag) { g_drag=false; ReleaseCapture(); } return 0; }
         case WM_MOUSEWHEEL: {
             if (g_fontListOpen) {
@@ -534,6 +538,15 @@ void SettingsDialog::Show(HWND owner) {
     RegisterClassExW(&wc);
 
     int x=(GetSystemMetrics(SM_CXSCREEN)-KW)/2, y=(GetSystemMetrics(SM_CYSCREEN)-KH)/2;
+
+    // DPI 缩放
+    UINT dpi = GetDpiForSystem();
+    g_dpiScale = dpi / 96.0f;
+    KW = (int)(BASE_W * g_dpiScale);
+    KH = (int)(BASE_H * g_dpiScale);
+    CONTENT_Y = (int)((TITLE_H + TAB_H + 8) * g_dpiScale);
+    x=(GetSystemMetrics(SM_CXSCREEN)-KW)/2; y=(GetSystemMetrics(SM_CYSCREEN)-KH)/2;
+
     g_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"TSSettingsV2", L"",
         WS_POPUP|WS_VISIBLE, x, y, KW, KH, owner, nullptr, wc.hInstance, nullptr);
     if (!g_hwnd) return;
