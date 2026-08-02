@@ -38,6 +38,7 @@ struct OverlayConfig {
 
     // 布局
     float    spacingScale      = 1.0f;
+    float    overlayOpacity    = 1.0f;
 
     // 位置
     bool alignRight = true;   // 右对齐（靠托盘区）
