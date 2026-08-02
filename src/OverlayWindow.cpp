@@ -247,6 +247,7 @@ bool OverlayWindow::InitComposition() {
 
 void OverlayWindow::ReleaseAll() {
     // 释放顺序：依赖方在前
+    if (m_opLayer)       { m_opLayer->Release();       m_opLayer = nullptr; }
     if (m_d2dBitmap)    { m_d2dBitmap->Release();    m_d2dBitmap = nullptr; }
     if (m_brushBg)      { m_brushBg->Release();      m_brushBg = nullptr; }
     if (m_brushSeparator){ m_brushSeparator->Release(); m_brushSeparator = nullptr; }
@@ -454,17 +455,17 @@ void OverlayWindow::Render() {
 
     // 应用整体透明度
     if (m_config.overlayOpacity < 0.99f) {
-        ID2D1Layer* layer = nullptr;
-        m_d2dContext->CreateLayer(nullptr, &layer);
-        if (layer) {
+        if (!m_opLayer) {
+            m_d2dContext->CreateLayer(nullptr, &m_opLayer);
+        }
+        if (m_opLayer) {
             D2D1_LAYER_PARAMETERS1 lp = D2D1::LayerParameters1(
                 D2D1::InfiniteRect(), nullptr,
                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(),
                 m_config.overlayOpacity);
-            m_d2dContext->PushLayer(lp, layer);
+            m_d2dContext->PushLayer(lp, m_opLayer);
             DrawMetrics(m_d2dContext, m);
             m_d2dContext->PopLayer();
-            layer->Release();
         } else {
             DrawMetrics(m_d2dContext, m);
         }
