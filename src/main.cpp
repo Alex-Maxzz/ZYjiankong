@@ -36,6 +36,10 @@ enum : UINT {
     IDM_COLOR_YELLOW      = 2032,
     IDM_COLOR_CYAN        = 2033,
     IDM_COLOR_GREEN       = 2034,
+    IDM_TOGGLE_DOTS       = 2041,  // 彩色指示点
+    IDM_TOGGLE_TEMP_COLOR = 2042,  // 温度色阶
+    IDM_TOGGLE_NET_SPLIT  = 2043,  // 网络异色
+    IDM_TOGGLE_SEPARATOR  = 2044,  // 项间分隔符
 };
 
 static HMENU g_hMenu = nullptr;
@@ -86,6 +90,12 @@ static void ApplyConfigToOverlay() {
     oc.fontSize     = dc.fontSize;
     oc.textColor    = dc.textColor;
     oc.accentColor  = dc.accentColor;
+    oc.showIndicatorDots = dc.showIndicatorDots;
+    oc.tempColorGradient = dc.tempColorGradient;
+    oc.netColorSplit     = dc.netColorSplit;
+    oc.showSeparator     = dc.showSeparator;
+    oc.netUpColor        = dc.netUpColor;
+    oc.netDownColor      = dc.netDownColor;
     oc.alignRight   = false;
     OverlayWindow::Instance().SetConfig(oc);
 }
@@ -95,7 +105,7 @@ static void ApplyConfigToOverlay() {
 static void ShowContextMenu(HWND hwnd) {
     if (!g_hMenu) g_hMenu = CreatePopupMenu();
     while (GetMenuItemCount(g_hMenu) > 0)
-        RemoveMenu(g_hMenu, 0, MF_BYPOSITION);
+        DeleteMenu(g_hMenu, 0, MF_BYPOSITION);  // DeleteMenu 会销毁子菜单，RemoveMenu 不会
 
     const DisplayConfig& dc = AppConfig::Instance().Get();
 
@@ -149,6 +159,18 @@ static void ShowContextMenu(HWND hwnd) {
         IDM_COLOR_GREEN, L"绿色");
     AppendMenuW(g_hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hColor), L"文字颜色");
 
+    // 外观增强
+    HMENU hVisual = CreatePopupMenu();
+    AppendMenuW(hVisual, MF_STRING | (dc.showIndicatorDots ? MF_CHECKED : 0),
+        IDM_TOGGLE_DOTS, L"彩色指示点");
+    AppendMenuW(hVisual, MF_STRING | (dc.tempColorGradient ? MF_CHECKED : 0),
+        IDM_TOGGLE_TEMP_COLOR, L"温度色阶");
+    AppendMenuW(hVisual, MF_STRING | (dc.netColorSplit ? MF_CHECKED : 0),
+        IDM_TOGGLE_NET_SPLIT, L"网络上下行异色");
+    AppendMenuW(hVisual, MF_STRING | (dc.showSeparator ? MF_CHECKED : 0),
+        IDM_TOGGLE_SEPARATOR, L"项间分隔符");
+    AppendMenuW(g_hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hVisual), L"外观增强");
+
     AppendMenuW(g_hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(g_hMenu, MF_STRING, IDM_EXIT, L"退出");
 
@@ -157,6 +179,7 @@ static void ShowContextMenu(HWND hwnd) {
     SetForegroundWindow(hwnd);
     TrackPopupMenu(g_hMenu, TPM_RIGHTALIGN | TPM_BOTTOMALIGN,
         pt.x, pt.y, 0, hwnd, nullptr);
+    PostMessageW(hwnd, WM_NULL, 0, 0);  // KB135788: 确保菜单正确关闭
 }
 
 // ===================== 切换配置项 =====================
@@ -227,11 +250,44 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 case IDM_COLOR_YELLOW: SetTextColor(0xFFFFFF00); return 0;
                 case IDM_COLOR_CYAN:   SetTextColor(0xFF00FFFF); return 0;
                 case IDM_COLOR_GREEN:  SetTextColor(0xFF00FF66); return 0;
+                case IDM_TOGGLE_DOTS: {
+                    DisplayConfig dc = AppConfig::Instance().Get();
+                    dc.showIndicatorDots = !dc.showIndicatorDots;
+                    AppConfig::Instance().Set(dc);
+                    AppConfig::Instance().Save();
+                    ApplyConfigToOverlay();
+                    return 0;
+                }
+                case IDM_TOGGLE_TEMP_COLOR: {
+                    DisplayConfig dc = AppConfig::Instance().Get();
+                    dc.tempColorGradient = !dc.tempColorGradient;
+                    AppConfig::Instance().Set(dc);
+                    AppConfig::Instance().Save();
+                    ApplyConfigToOverlay();
+                    return 0;
+                }
+                case IDM_TOGGLE_NET_SPLIT: {
+                    DisplayConfig dc = AppConfig::Instance().Get();
+                    dc.netColorSplit = !dc.netColorSplit;
+                    AppConfig::Instance().Set(dc);
+                    AppConfig::Instance().Save();
+                    ApplyConfigToOverlay();
+                    return 0;
+                }
+                case IDM_TOGGLE_SEPARATOR: {
+                    DisplayConfig dc = AppConfig::Instance().Get();
+                    dc.showSeparator = !dc.showSeparator;
+                    AppConfig::Instance().Set(dc);
+                    AppConfig::Instance().Save();
+                    ApplyConfigToOverlay();
+                    return 0;
+                }
                 default:
                     if (id >= IDM_TOGGLE_CPU_TEMP && id <= IDM_TOGGLE_NET_DOWN) {
                         ToggleShowFlag(id);
+                        return 0;
                     }
-                    return 0;
+                    break;  // 未知命令交给 DefWindowProcW
             }
         }
         case WM_TIMER:
@@ -265,6 +321,13 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 // ===================== 主入口 =====================
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR cmdLine, int) {
+    // 单实例保护：已运行则直接退出
+    HANDLE hSingle = CreateMutexW(nullptr, TRUE, L"TaskbarStudio_SingleInstance");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (hSingle) CloseHandle(hSingle);
+        return 0;
+    }
+
     // --silent 参数：开机静默启动
     bool silent = (cmdLine && wcsstr(cmdLine, L"--silent") != nullptr);
 
@@ -312,6 +375,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR cmdLine, int) {
     oc.fontSize     = dc.fontSize;
     oc.textColor    = dc.textColor;
     oc.accentColor  = dc.accentColor;
+    oc.showIndicatorDots = dc.showIndicatorDots;
+    oc.tempColorGradient = dc.tempColorGradient;
+    oc.netColorSplit     = dc.netColorSplit;
+    oc.showSeparator     = dc.showSeparator;
+    oc.netUpColor        = dc.netUpColor;
+    oc.netDownColor      = dc.netDownColor;
     oc.alignRight   = false;
     if (!OverlayWindow::Instance().Create(oc)) {
         if (!silent) MessageBoxW(nullptr, L"悬浮窗创建失败", kAppTitle, MB_ICONWARNING);
@@ -337,5 +406,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR cmdLine, int) {
     DestroyWindow(hwnd);
     UnregisterClassW(L"TaskbarStudioMain", hInst);
     CoUninitialize();
+    if (hSingle) CloseHandle(hSingle);
     return static_cast<int>(msg.wParam);
 }

@@ -40,18 +40,22 @@ bool Monitor::Start() {
 
         // 采集循环：每秒一次快指标，每 5 秒一次慢指标
         while (m_running.load()) {
-            auto now = std::chrono::steady_clock::now();
+            try {
+                auto now = std::chrono::steady_clock::now();
 
-            // 快指标（轻量，1s）
-            CollectCpuUsage();
-            CollectCpuTemp();   // PawnIO 读 PM Table = 内存拷贝，微秒级
-            CollectMemory();
-            CollectNetwork();
+                // 快指标（轻量，1s）
+                CollectCpuUsage();
+                CollectCpuTemp();   // PawnIO 读 PM Table = 内存拷贝，微秒级
+                CollectMemory();
+                CollectNetwork();
 
-            // 慢指标（WMI/NVAPI 较重，5s）
-            if (now - m_prevSlowTime >= std::chrono::seconds(5)) {
-                m_prevSlowTime = now;
-                CollectGpu();
+                // 慢指标（WMI/NVAPI 较重，5s）
+                if (now - m_prevSlowTime >= std::chrono::seconds(5)) {
+                    m_prevSlowTime = now;
+                    CollectGpu();
+                }
+            } catch (...) {
+                // 防止异常穿透线程导致 terminate + COM 泄漏
             }
 
             // 休眠但可被 Stop 唤醒
@@ -254,8 +258,18 @@ void Monitor::CollectCpuTemp() {
     }
 
     // 方案 2：LibreHardwareMonitor HTTP API（备选，需 LHM 后台运行）
+    // 失败后 30 秒内不重试，避免 HTTP 超时阻塞 1 秒快速循环
     if (temp < 0) {
-        temp = FetchLhmTemperature();
+        auto now = std::chrono::steady_clock::now();
+        if (!m_lhmFailed || (now - m_lhmFailTime >= std::chrono::seconds(30))) {
+            temp = FetchLhmTemperature();
+            if (temp < 0) {
+                m_lhmFailed = true;
+                m_lhmFailTime = now;
+            } else {
+                m_lhmFailed = false;
+            }
+        }
     }
 
     // 方案 3：MSAcpi_ThermalZoneTemperature（Intel 常见）
@@ -302,7 +316,7 @@ void Monitor::CollectCpuTemp() {
                     else if (v.vt == VT_UI4) raw = static_cast<long long>(v.ulVal);
                     if (raw > 0) {
                         float candidate = raw / 10.0f;
-                        if (candidate > 0 && candidate < 120) temp = candidate;
+                        if (candidate > 0 && candidate < 150) temp = candidate;
                     }
                 }
                 VariantClear(&v);
@@ -313,9 +327,17 @@ void Monitor::CollectCpuTemp() {
         }
     }
 
+    // 更新温度 + 过期保护
     if (temp > 0) {
+        m_tempFailCount = 0;
         std::lock_guard<std::mutex> lock(m_mutex);
         m_metrics.cpuTemp = temp;
+    } else {
+        // 连续失败超过阈值：重置为 -1（界面隐藏），防止显示冻结的假温度
+        if (++m_tempFailCount >= kTempFailMax) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_metrics.cpuTemp = -1.0f;
+        }
     }
 }
 
@@ -381,6 +403,16 @@ void Monitor::CollectNetwork() {
     FreeMibTable(ifTable);
 
     auto now = std::chrono::steady_clock::now();
+
+    // 首次采样：只记录基准值，不计算速率（避免启动瞬间数值爆炸）
+    if (m_netFirstSample) {
+        m_netFirstSample = false;
+        m_prevNetUp   = totalUp;
+        m_prevNetDown = totalDown;
+        m_prevNetTime = now;
+        return;
+    }
+
     auto dt = std::chrono::duration<double>(now - m_prevNetTime).count();
 
     uint64_t upRate = 0, downRate = 0;

@@ -36,11 +36,16 @@ bool AppConfig::Load() {
     if (h == INVALID_HANDLE_VALUE) { m_loaded = true; return false; }
 
     LARGE_INTEGER sz;
-    GetFileSizeEx(h, &sz);
-    std::string json(sz.QuadPart, '\0');
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > 1024 * 1024) {
+        CloseHandle(h);
+        m_loaded = true;
+        return false;
+    }
+    std::string json(static_cast<size_t>(sz.QuadPart), '\0');
     DWORD read = 0;
     ReadFile(h, json.data(), static_cast<DWORD>(sz.QuadPart), &read, nullptr);
     CloseHandle(h);
+    json.resize(read);  // 截断到实际读取长度
 
     // 极简解析：查找 key=value 模式
     auto getBool = [&](const char* key, bool def) -> bool {
@@ -78,8 +83,23 @@ bool AppConfig::Load() {
     m_cfg.fontSize         = getFloat("fontSize", 12.0f);
     m_cfg.textColor        = getUint("textColor", 0xFFFFFFFF);
     m_cfg.accentColor      = getUint("accentColor", 0xFF4A90E2);
+
+    m_cfg.showIndicatorDots = getBool("showIndicatorDots", true);
+    m_cfg.tempColorGradient = getBool("tempColorGradient", true);
+    m_cfg.netColorSplit     = getBool("netColorSplit", true);
+    m_cfg.showSeparator     = getBool("showSeparator", true);
+    m_cfg.netUpColor        = getUint("netUpColor", 0xFFFF8C00);
+    m_cfg.netDownColor      = getUint("netDownColor", 0xFF00CED1);
+
     m_cfg.hideOnFullscreen = getBool("hideOnFullscreen", true);
     m_cfg.runOnStartup     = IsStartupEnabled();
+
+    // ---- 配置校验：异常值回退默认 ----
+    if (m_cfg.fontSize < 8.0f || m_cfg.fontSize > 24.0f) m_cfg.fontSize = 12.0f;
+    if (m_cfg.textColor == 0)   m_cfg.textColor = 0xFFFFFFFF;
+    if (m_cfg.accentColor == 0) m_cfg.accentColor = 0xFF4A90E2;
+    if (m_cfg.netUpColor == 0)  m_cfg.netUpColor = 0xFFFF8C00;
+    if (m_cfg.netDownColor == 0) m_cfg.netDownColor = 0xFF00CED1;
 
     m_loaded = true;
     return true;
@@ -91,7 +111,7 @@ bool AppConfig::Save() {
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
 
-    char buf[1024];
+    char buf[2048];
     int n = snprintf(buf, sizeof(buf),
         "{\n"
         "  \"showCpuTemp\": %s,\n"
@@ -104,6 +124,12 @@ bool AppConfig::Save() {
         "  \"fontSize\": %.1f,\n"
         "  \"textColor\": 0x%08X,\n"
         "  \"accentColor\": 0x%08X,\n"
+        "  \"showIndicatorDots\": %s,\n"
+        "  \"tempColorGradient\": %s,\n"
+        "  \"netColorSplit\": %s,\n"
+        "  \"showSeparator\": %s,\n"
+        "  \"netUpColor\": 0x%08X,\n"
+        "  \"netDownColor\": 0x%08X,\n"
         "  \"hideOnFullscreen\": %s,\n"
         "  \"runOnStartup\": %s\n"
         "}\n",
@@ -117,6 +143,12 @@ bool AppConfig::Save() {
         m_cfg.fontSize,
         m_cfg.textColor,
         m_cfg.accentColor,
+        m_cfg.showIndicatorDots ? "true" : "false",
+        m_cfg.tempColorGradient ? "true" : "false",
+        m_cfg.netColorSplit     ? "true" : "false",
+        m_cfg.showSeparator     ? "true" : "false",
+        m_cfg.netUpColor,
+        m_cfg.netDownColor,
         m_cfg.hideOnFullscreen ? "true" : "false",
         m_cfg.runOnStartup     ? "true" : "false");
 
@@ -124,8 +156,10 @@ bool AppConfig::Save() {
     WriteFile(h, buf, static_cast<DWORD>(n), &written, nullptr);
     CloseHandle(h);
 
-    // 同步注册表开机启动
-    EnableStartup(m_cfg.runOnStartup);
+    // 仅在开机启动状态变化时写注册表（避免每次 Save 都触发）
+    if (IsStartupEnabled() != m_cfg.runOnStartup) {
+        EnableStartup(m_cfg.runOnStartup);
+    }
     return true;
 }
 
