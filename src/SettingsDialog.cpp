@@ -375,13 +375,40 @@ static void CreateNetPage(HWND page) {
     CreateCtrl(page, L"STATIC", L"（颜色在[颜色]页设置）", 0, 15, y, 200, 18, 0);
 }
 
+// 页容器窗口过程：转发 WM_COMMAND / WM_DRAWITEM 到父对话框
+static LRESULT CALLBACK PageWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_COMMAND:
+        case WM_DRAWITEM:
+            // 转发给父对话框处理
+            return SendMessageW(GetParent(hwnd), msg, wp, lp);
+        default:
+            return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+}
+
+static bool g_pageClassRegistered = false;
+static const wchar_t* kPageClassName = L"TSSettingsPage";
+
 static void CreateTabPage(HWND hDlg, int page) {
+    // 注册页容器类（仅一次）
+    if (!g_pageClassRegistered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = PageWndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kPageClassName;
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        RegisterClassExW(&wc);
+        g_pageClassRegistered = true;
+    }
+
     // 获取 Tab 控件的显示区域
     RECT rc;
     GetClientRect(g_hTab, &rc);
     TabCtrl_AdjustRect(g_hTab, FALSE, &rc);
 
-    HWND hPage = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_CLIPCHILDREN,
+    HWND hPage = CreateWindowExW(0, kPageClassName, L"", WS_CHILD | WS_CLIPCHILDREN,
         rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
         hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
     g_hPage[page] = hPage;
