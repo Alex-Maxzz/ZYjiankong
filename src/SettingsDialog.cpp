@@ -49,14 +49,12 @@ enum : int {
 struct ColorSwatch { uint32_t argb; const wchar_t* name; };
 
 static const ColorSwatch kTextPalette[] = {
-    {0xFFFFFFFF, L"白"}, {0xFFE0E0E0, L"银"}, {0xFFFFD700, L"金"},
-    {0xFFFFA500, L"橙"}, {0xFFFF6347, L"番茄"}, {0xFFFF69B4, L"粉"},
-    {0xFFDA70D6, L"紫"}, {0xFF9B8CFF, L"薰衣草"}, {0xFF4A90E2, L"蓝"},
-    {0xFF00BFFF, L"天蓝"}, {0xFF00CED1, L"青"}, {0xFF00FA9A, L"薄荷"},
-    {0xFF00FF66, L"绿"}, {0xFFADFF2F, L"黄绿"}, {0xFFF5DEB3, L"小麦"},
-    {0xFFD2B48C, L"棕"},
+    {0xFFFFFFFF, L"纯白"}, {0xFFF1F5F9, L"霜白"}, {0xFFE2E8F0, L"银灰"},
+    {0xFFFBBF24, L"琥珀"}, {0xFFFB923C, L"暖橙"}, {0xFFF87171, L"珊瑚"},
+    {0xFFA78BFA, L"紫罗兰"}, {0xFF818CF8, L"靛蓝"}, {0xFF60A5FA, L"天青"},
+    {0xFF34D399, L"翡翠"}, {0xFF4ADE80, L"草绿"}, {0xFF2DD4BF, L"碧青"},
 };
-static const int kTextPaletteCount = 16;
+static const int kTextPaletteCount = 12;
 
 static const ColorSwatch kNetPalette[] = {
     {0xFFFF8C00, L"橙"}, {0xFF00CED1, L"青"}, {0xFF4A90E2, L"蓝"},
@@ -242,9 +240,9 @@ static void CreateAppearancePage(HWND page) {
     int y = 10;
 
     // 字体选择
-    CreateCtrl(page, L"STATIC", L"字体:", 0, 15, y + 2, 40, 20, IDC_FONT_LABEL);
+    CreateCtrl(page, L"STATIC", L"显示字体:", 0, 15, y + 2, 60, 20, IDC_FONT_LABEL);
     HWND hFont = CreateCtrl(page, L"COMBOBOX", L"",
-        CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 60, y, 200, 250, IDC_FONT_COMBO);
+        CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 80, y, 200, 250, IDC_FONT_COMBO);
     SendMessageW(hFont, WM_SETFONT, (WPARAM)g_hUiFont, TRUE);
     // 填充字体列表
     int selIdx = 0;
@@ -256,9 +254,9 @@ static void CreateAppearancePage(HWND page) {
     y += 32;
 
     // 字号
-    CreateCtrl(page, L"STATIC", L"字号:", 0, 15, y + 2, 40, 20, IDC_SIZE_LABEL);
+    CreateCtrl(page, L"STATIC", L"文字大小:", 0, 15, y + 2, 60, 20, IDC_SIZE_LABEL);
     HWND hSize = CreateCtrl(page, L"COMBOBOX", L"",
-        CBS_DROPDOWNLIST | WS_TABSTOP, 60, y, 80, 120, IDC_SIZE_COMBO);
+        CBS_DROPDOWNLIST | WS_TABSTOP, 80, y, 80, 120, IDC_SIZE_COMBO);
     SendMessageW(hSize, WM_SETFONT, (WPARAM)g_hUiFont, TRUE);
     SendMessageW(hSize, CB_ADDSTRING, 0, (LPARAM)L"小 (10)");
     SendMessageW(hSize, CB_ADDSTRING, 0, (LPARAM)L"中 (12)");
@@ -268,9 +266,9 @@ static void CreateAppearancePage(HWND page) {
     y += 32;
 
     // 间距
-    CreateCtrl(page, L"STATIC", L"间距:", 0, 15, y + 2, 40, 20, IDC_SPACING_LABEL);
+    CreateCtrl(page, L"STATIC", L"项目间距:", 0, 15, y + 2, 60, 20, IDC_SPACING_LABEL);
     HWND hSpace = CreateCtrl(page, L"COMBOBOX", L"",
-        CBS_DROPDOWNLIST | WS_TABSTOP, 60, y, 80, 120, IDC_SPACING_COMBO);
+        CBS_DROPDOWNLIST | WS_TABSTOP, 80, y, 80, 120, IDC_SPACING_COMBO);
     SendMessageW(hSpace, WM_SETFONT, (WPARAM)g_hUiFont, TRUE);
     SendMessageW(hSpace, CB_ADDSTRING, 0, (LPARAM)L"紧凑");
     SendMessageW(hSpace, CB_ADDSTRING, 0, (LPARAM)L"标准");
@@ -280,13 +278,13 @@ static void CreateAppearancePage(HWND page) {
     y += 36;
 
     // 复选框
-    HWND hDots = CreateCtrl(page, L"BUTTON", L"彩色指示点",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 15, y, 120, 22, IDC_DOTS_CHECK);
+    HWND hDots = CreateCtrl(page, L"BUTTON", L"指标前彩色圆点",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 15, y, 130, 22, IDC_DOTS_CHECK);
     SendMessageW(hDots, BM_SETCHECK, dc.showIndicatorDots ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(hDots, WM_SETFONT, (WPARAM)g_hUiFont, TRUE);
 
-    HWND hSep = CreateCtrl(page, L"BUTTON", L"项间分隔符",
-        BS_AUTOCHECKBOX | WS_TABSTOP, 150, y, 120, 22, IDC_SEPARATOR_CHECK);
+    HWND hSep = CreateCtrl(page, L"BUTTON", L"指标间竖线分隔",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 155, y, 130, 22, IDC_SEPARATOR_CHECK);
     SendMessageW(hSep, BM_SETCHECK, dc.showSeparator ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(hSep, WM_SETFONT, (WPARAM)g_hUiFont, TRUE);
 }
@@ -339,8 +337,8 @@ static void CreateColorPage(HWND page) {
     y += 28;
 
     // 自定义颜色按钮（打开系统色盘）
-    HWND hCustom = CreateCtrl(page, L"BUTTON", L"自定义颜色...",
-        BS_PUSHBUTTON | WS_TABSTOP, 15, y, 100, 24, IDC_CUSTOM_COLOR);
+    HWND hCustom = CreateCtrl(page, L"BUTTON", L"自定义文字色...",
+        BS_PUSHBUTTON | WS_TABSTOP, 15, y, 110, 24, IDC_CUSTOM_COLOR);
     SendMessageW(hCustom, WM_SETFONT, (WPARAM)g_hUiFont, TRUE);
 }
 
