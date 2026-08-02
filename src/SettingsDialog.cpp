@@ -513,7 +513,7 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
             // 转换为 client 坐标
             POINT pt = {LOWORD(lp), HIWORD(lp)};
             ScreenToClient(hw, &pt);
-            if (pt.y < TITLE_H && pt.x < KW-40) return HTCAPTION;
+            if (pt.y < (int)(TITLE_H * g_dpiScale) && pt.x < KW-40) return HTCAPTION;
             return HTCLIENT;
         }
         case WM_CLOSE: SettingsDialog::Close(); return 0;
@@ -544,7 +544,8 @@ void SettingsDialog::Show(HWND owner) {
     g_dpiScale = dpi / 96.0f;
     KW = (int)(BASE_W * g_dpiScale);
     KH = (int)(BASE_H * g_dpiScale);
-    CONTENT_Y = (int)((TITLE_H + TAB_H + 8) * g_dpiScale);
+    // CONTENT_Y 保持设计值（渲染在设计坐标空间，D2D Transform 负责缩放）
+    CONTENT_Y = TITLE_H + TAB_H + 8;
     x=(GetSystemMetrics(SM_CXSCREEN)-KW)/2; y=(GetSystemMetrics(SM_CYSCREEN)-KH)/2;
 
     g_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"TSSettingsV2", L"",
