@@ -24,6 +24,7 @@ add_executable(${PROJECT_NAME} WIN32
     src/OverlayWindow.cpp
     src/AppConfig.cpp
     src/FullscreenDetect.cpp
+    src/SettingsDialog.cpp
     src/app.rc
 )
 

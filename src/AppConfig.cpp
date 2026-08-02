@@ -72,6 +72,19 @@ bool AppConfig::Load() {
         while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
         try { return static_cast<uint32_t>(std::stoul(json.substr(pos), nullptr, 0)); } catch (...) { return def; }
     };
+    auto getStringW = [&](const char* key, const wchar_t* def) -> std::wstring {
+        std::string k = "\"" + std::string(key) + "\":\"";
+        auto pos = json.find(k);
+        if (pos == std::string::npos) return def;
+        pos += k.size();
+        auto end = json.find('"', pos);
+        if (end == std::string::npos) return def;
+        std::string val = json.substr(pos, end - pos);
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, val.c_str(), (int)val.size(), nullptr, 0);
+        std::wstring wval(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, val.c_str(), (int)val.size(), &wval[0], wlen);
+        return wval;
+    };
 
     m_cfg.showCpuTemp      = getBool("showCpuTemp", true);
     m_cfg.showCpuUsage     = getBool("showCpuUsage", true);
@@ -90,6 +103,12 @@ bool AppConfig::Load() {
     m_cfg.showSeparator     = getBool("showSeparator", true);
     m_cfg.netUpColor        = getUint("netUpColor", 0xFFFF8C00);
     m_cfg.netDownColor      = getUint("netDownColor", 0xFF00CED1);
+
+    // 字体 + 温度阈值 + 间距
+    m_cfg.fontFamily        = getStringW("fontFamily", L"Segoe UI");
+    m_cfg.tempLowThreshold  = getFloat("tempLowThreshold", 45.0f);
+    m_cfg.tempHighThreshold = getFloat("tempHighThreshold", 90.0f);
+    m_cfg.spacingScale      = getFloat("spacingScale", 1.0f);
 
     m_cfg.hideOnFullscreen = getBool("hideOnFullscreen", true);
     m_cfg.runOnStartup     = IsStartupEnabled();
@@ -111,6 +130,11 @@ bool AppConfig::Save() {
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
 
+    // fontFamily wstring → UTF-8
+    char fontUtf8[256] = "Segoe UI";
+    WideCharToMultiByte(CP_UTF8, 0, m_cfg.fontFamily.c_str(), -1,
+        fontUtf8, sizeof(fontUtf8), nullptr, nullptr);
+
     char buf[2048];
     int n = snprintf(buf, sizeof(buf),
         "{\n"
@@ -130,6 +154,10 @@ bool AppConfig::Save() {
         "  \"showSeparator\": %s,\n"
         "  \"netUpColor\": 0x%08X,\n"
         "  \"netDownColor\": 0x%08X,\n"
+        "  \"fontFamily\": \"%s\",\n"
+        "  \"tempLowThreshold\": %.1f,\n"
+        "  \"tempHighThreshold\": %.1f,\n"
+        "  \"spacingScale\": %.2f,\n"
         "  \"hideOnFullscreen\": %s,\n"
         "  \"runOnStartup\": %s\n"
         "}\n",
@@ -149,6 +177,10 @@ bool AppConfig::Save() {
         m_cfg.showSeparator     ? "true" : "false",
         m_cfg.netUpColor,
         m_cfg.netDownColor,
+        fontUtf8,
+        m_cfg.tempLowThreshold,
+        m_cfg.tempHighThreshold,
+        m_cfg.spacingScale,
         m_cfg.hideOnFullscreen ? "true" : "false",
         m_cfg.runOnStartup     ? "true" : "false");
 

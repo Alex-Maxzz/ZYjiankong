@@ -4,6 +4,7 @@
 #include "OverlayWindow.h"
 #include "AppConfig.h"
 #include "FullscreenDetect.h"
+#include "SettingsDialog.h"
 
 #include <shellapi.h>
 #include <commctrl.h>
@@ -20,6 +21,7 @@ static const UINT     kTrayId         = 1000;
 // 菜单命令 ID
 enum : UINT {
     IDM_EXIT              = 1001,
+    IDM_SETTINGS          = 1002,
     IDM_STARTUP           = 2001,
     IDM_HIDE_FULLSCREEN   = 2002,
     IDM_TOGGLE_CPU_TEMP   = 2010,
@@ -172,6 +174,7 @@ static void ShowContextMenu(HWND hwnd) {
     AppendMenuW(g_hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hVisual), L"外观增强");
 
     AppendMenuW(g_hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_hMenu, MF_STRING, IDM_SETTINGS, L"设置...");
     AppendMenuW(g_hMenu, MF_STRING, IDM_EXIT, L"退出");
 
     POINT pt;
@@ -226,6 +229,9 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_COMMAND: {
             UINT id = LOWORD(wp);
             switch (id) {
+                case IDM_SETTINGS:
+                    SettingsDialog::Show(hwnd);
+                    return 0;
                 case IDM_EXIT:
                     PostQuitMessage(0);
                     return 0;

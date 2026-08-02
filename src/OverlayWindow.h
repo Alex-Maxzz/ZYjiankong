@@ -4,6 +4,8 @@
 #pragma once
 #include "pch.h"
 
+struct SystemMetrics;  // forward decl (defined in Monitor.h)
+
 // 显示项配置（哪些指标显示在任务栏上）
 struct OverlayConfig {
     bool showCpuTemp  = true;
@@ -26,6 +28,16 @@ struct OverlayConfig {
     bool     showSeparator      = true;  // 项间分隔符
     uint32_t netUpColor         = 0xFFFF8C00;   // 上行橙色
     uint32_t netDownColor       = 0xFF00CED1;   // 下行青色
+
+    // 字体
+    std::wstring fontFamily = L"Segoe UI";
+
+    // 温度色阶阈值
+    float    tempLowThreshold  = 45.0f;
+    float    tempHighThreshold = 90.0f;
+
+    // 布局
+    float    spacingScale      = 1.0f;
 
     // 位置
     bool alignRight = true;   // 右对齐（靠托盘区）
@@ -117,7 +129,8 @@ private:
     // DirectWrite
     IDWriteFactory*         m_dwriteFactory{nullptr};
     IDWriteTextFormat*      m_textFormat{nullptr};   // 主字体
-    IDWriteTextFormat*      m_monoFormat{nullptr};   // 等宽（数字）
+    IDWriteTextFormat*      m_monoFormat{nullptr};   // 数字字体
+    IDWriteTypography*      m_tnumTypography{nullptr}; // tnum 等宽数字特性
 
     // 画刷
     ID2D1SolidColorBrush*   m_brushText{nullptr};
