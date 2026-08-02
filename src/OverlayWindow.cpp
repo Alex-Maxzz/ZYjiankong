@@ -142,27 +142,38 @@ bool OverlayWindow::InitD2D() {
 bool OverlayWindow::CreateFontsAndBrushes() {
     if (!m_dwriteFactory || !m_d2dContext) return false;
 
-    // 主字体（紧凑无衬线）
+    float sizePx = m_config.fontSize * m_dpi / 96.0f;
+    const wchar_t* family = m_config.fontFamily.empty() ? L"Segoe UI" : m_config.fontFamily.c_str();
+
+    // 主字体（用户选择的字体）
     if (m_textFormat) { m_textFormat->Release(); m_textFormat = nullptr; }
     m_dwriteFactory->CreateTextFormat(
-        L"Segoe UI Variable", nullptr,
+        family, nullptr,
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_STRETCH_NORMAL,
-        m_config.fontSize * m_dpi / 96.0f, L"zh-CN", &m_textFormat);
+        DWRITE_FONT_STRETCH_NORMAL, sizePx, L"zh-CN", &m_textFormat);
 
-    // 等宽数字字体（防跳位）
+    // 数字字体（同字体，Medium 权重增强可读性）
     if (m_monoFormat) { m_monoFormat->Release(); m_monoFormat = nullptr; }
     m_dwriteFactory->CreateTextFormat(
-        L"Cascadia Mono", nullptr,
+        family, nullptr,
         DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_STRETCH_NORMAL,
-        m_config.fontSize * m_dpi / 96.0f, L"en-US", &m_monoFormat);
+        DWRITE_FONT_STRETCH_NORMAL, sizePx, L"en-US", &m_monoFormat);
     if (!m_monoFormat) {
+        // fallback: 用户字体不存在时用 Consolas
         m_dwriteFactory->CreateTextFormat(
             L"Consolas", nullptr,
             DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            m_config.fontSize * m_dpi / 96.0f, L"en-US", &m_monoFormat);
+            DWRITE_FONT_STRETCH_NORMAL, sizePx, L"en-US", &m_monoFormat);
+    }
+
+    // tnum 排版特性（数字等宽，防跳位）
+    if (m_tnumTypography) { m_tnumTypography->Release(); m_tnumTypography = nullptr; }
+    m_dwriteFactory->CreateTypography(&m_tnumTypography);
+    if (m_tnumTypography) {
+        DWRITE_FONT_FEATURE tnum{};
+        tnum.nameTag = DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES;
+        tnum.parameter = 1;
+        m_tnumTypography->AddFontFeature(tnum);
     }
 
     // 画刷（仅创建一次，颜色变化时 SetColor）
@@ -244,6 +255,7 @@ void OverlayWindow::ReleaseAll() {
     if (m_brushAccent)  { m_brushAccent->Release();  m_brushAccent = nullptr; }
     if (m_brushText)    { m_brushText->Release();    m_brushText = nullptr; }
     if (m_monoFormat)   { m_monoFormat->Release();   m_monoFormat = nullptr; }
+    if (m_tnumTypography){ m_tnumTypography->Release(); m_tnumTypography = nullptr; }
     if (m_textFormat)   { m_textFormat->Release();   m_textFormat = nullptr; }
     if (m_dwriteFactory){ m_dwriteFactory->Release(); m_dwriteFactory = nullptr; }
     if (m_dcompVisual)  { m_dcompVisual->Release();  m_dcompVisual = nullptr; }
@@ -593,6 +605,11 @@ void OverlayWindow::DrawTextLeft(ID2D1DeviceContext* ctx, const std::wstring& te
         static_cast<UINT32>(text.size()), fmt,
         1000.0f, fontSizePx * 2, &layout);
     if (!layout) return;
+    // 应用 tnum（数字等宽），防止数值变化时宽度跳变
+    if (m_tnumTypography) {
+        DWRITE_TEXT_RANGE allRange{0, static_cast<UINT32>(text.size())};
+        layout->SetTypography(m_tnumTypography, allRange);
+    }
     DWRITE_TEXT_METRICS tm;
     layout->GetMetrics(&tm);
     ctx->DrawTextLayout(D2D1::Point2F(x, y), layout, brush,
