@@ -198,36 +198,78 @@ bool AppConfig::Save() {
     return true;
 }
 
-bool AppConfig::IsStartupEnabled() {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
-        return false;
+// ===================== 开机启动（任务计划程序） =====================
+// 程序 manifest 要求 requireAdministrator，注册表 Run 键启动需要 UAC 弹窗，
+// Windows 会静默跳过或被 UAC 拦截。改用任务计划程序 /rl highest 自动提权。
+// 本进程已是管理员权限，schtasks 继承令牌直接执行。
 
-    wchar_t value[MAX_PATH] = {};
-    DWORD sz = sizeof(value);
-    LSTATUS r = RegQueryValueExW(hKey, kAppTitle, nullptr, nullptr,
-        reinterpret_cast<LPBYTE>(value), &sz);
-    RegCloseKey(hKey);
-    return r == ERROR_SUCCESS;
+static const wchar_t* kTaskName = L"TaskbarStudio_AutoStart";
+
+// 辅助：执行 schtasks 命令并等待返回
+static int RunSchtasks(const wchar_t* params) {
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+
+    std::wstring cmd = std::wstring(L"schtasks.exe ") + params;
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE,
+            CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        return -1;
+    }
+    WaitForSingleObject(pi.hProcess, 10000);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return static_cast<int>(exitCode);
+}
+
+bool AppConfig::IsStartupEnabled() {
+    // 优先检查任务计划程序
+    if (RunSchtasks(L"/query /tn TaskbarStudio_AutoStart") == 0)
+        return true;
+
+    // 回退检查注册表（兼容旧版本写入的项）
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        wchar_t value[MAX_PATH] = {};
+        DWORD sz = sizeof(value);
+        LSTATUS r = RegQueryValueExW(hKey, kAppTitle, nullptr, nullptr,
+            reinterpret_cast<LPBYTE>(value), &sz);
+        RegCloseKey(hKey);
+        if (r == ERROR_SUCCESS) {
+            // 旧注册表项存在 → 迁移到任务计划程序，然后删除注册表项
+            EnableStartup(true);
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+                RegDeleteValueW(hKey, kAppTitle);
+                RegCloseKey(hKey);
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 bool AppConfig::EnableStartup(bool enable) {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
-        return false;
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
 
-    bool ok = false;
     if (enable) {
-        wchar_t exePath[MAX_PATH];
-        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-        std::wstring cmd = std::wstring(L"\"") + exePath + L"\" --silent";
-        ok = RegSetValueExW(hKey, kAppTitle, 0, REG_SZ,
-            reinterpret_cast<const BYTE*>(cmd.c_str()),
-            static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
+        // 创建任务计划：用户登录时以最高权限静默运行
+        std::wstring params = L"/create /tn TaskbarStudio_AutoStart /tr \"\\\"" +
+            std::wstring(exePath) + L"\\\" --silent\" /sc onlogon /rl highest /f";
+        return RunSchtasks(params.c_str()) == 0;
     } else {
-        ok = RegDeleteValueW(hKey, kAppTitle) == ERROR_SUCCESS ||
-             GetLastError() == ERROR_FILE_NOT_FOUND;
+        // 删除任务计划
+        RunSchtasks(L"/delete /tn TaskbarStudio_AutoStart /f");
+        // 同时清理旧注册表项（兼容迁移）
+        HKEY hKey;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+            RegDeleteValueW(hKey, kAppTitle);
+            RegCloseKey(hKey);
+        }
+        return true;
     }
-    RegCloseKey(hKey);
-    return ok;
 }
