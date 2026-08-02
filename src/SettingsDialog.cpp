@@ -106,21 +106,12 @@ static int CALLBACK FontEnumProc(const LOGFONTW* lf, const TEXTMETRICW* tm,
 
 static void PopulateFonts() {
     g_fontList.clear();
-    // 推荐字体置顶
+    // 推荐字体置顶（未安装时 DirectWrite 自动 fallback，无需检查）
     const wchar_t* recommended[] = {
         L"Segoe UI", L"Consolas", L"Cascadia Code", L"Cascadia Mono",
         L"JetBrains Mono", L"Microsoft YaHei", L"微软雅黑",
     };
     for (auto* r : recommended) {
-        // 检查是否已安装
-        LOGFONTW lf{};
-        wcscpy_s(lf.lfFaceName, r);
-        lf.lfCharSet = DEFAULT_CHARSET;
-        HDC hdc = GetDC(nullptr);
-        int found = EnumFontFamiliesExW(hdc, &lf, FontEnumProc, 0, 0);
-        ReleaseDC(nullptr, hdc);
-        // EnumFontFamiliesEx 返回 0 表示找到并枚举了
-        // 直接加入推荐列表（如果系统有就显示，没有也不报错）
         g_fontList.push_back(r);
     }
 
