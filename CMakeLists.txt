@@ -34,3 +34,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ole32 oleaut32 wbemuuid
     user32 gdi32 shell32 comctl32
 )
+
+# 嵌入自定义 manifest（requireAdministrator + Per-Monitor DPI）
+# 禁用 CMake 默认 manifest，由 app.rc 中的 manifest 资源替代
+target_link_options(${PROJECT_NAME} PRIVATE /MANIFEST:NO)

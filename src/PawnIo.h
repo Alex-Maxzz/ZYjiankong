@@ -27,6 +27,7 @@ private:
     bool LoadBlobFromResource();
     bool ResolvePmTable();
     bool UpdateAndReadPmTable();
+    void DetectTempOffset();
 
     // PawnIO API 函数指针
     using pawnio_open_t    = HRESULT (STDAPICALLTYPE*)(PHANDLE);
@@ -44,9 +45,14 @@ private:
     pawnio_execute_t m_fnExecute{nullptr};
     pawnio_close_t   m_fnClose{nullptr};
 
+    // CPU 代号 + 温度偏移（多平台支持）
+    int              m_cpuCodeName{-1};
+    int              m_tempIndex{8};     // PM Table ULONG64 索引
+    bool             m_tempHigh{true};   // true=高32位, false=低32位
+
     // PM Table 缓存
     uint32_t         m_pmTableVersion{0};
     uint64_t         m_pmTableBase{0};
-    static constexpr int kPmTableSize = 1024;  // Phoenix PM table size (ULONG64 count)
+    static constexpr int kPmTableSize = 1024;
     ULONG64          m_pmTable[kPmTableSize]{};
 };
