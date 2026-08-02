@@ -6,7 +6,9 @@
 #include "OverlayWindow.h"
 
 #include <commctrl.h>
+#include <commdlg.h>
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 // ===================== 常量 =====================
 
@@ -34,6 +36,7 @@ enum : int {
     IDC_NETDOWN_COLOR_BASE = 270, // 270-275: 下行色板 (6色)
     IDC_TEXT_COLOR_LABEL = 280, IDC_NETUP_LABEL, IDC_NETDOWN_LABEL,
     IDC_NET_SPLIT_CHECK,
+    IDC_CUSTOM_COLOR,
     // 温度页 (290-299)
     IDC_TEMP_GRADIENT_CHECK = 290, IDC_TEMP_LOW_COMBO, IDC_TEMP_HIGH_COMBO,
     IDC_TEMP_LOW_LABEL, IDC_TEMP_HIGH_LABEL,
@@ -106,10 +109,15 @@ static int CALLBACK FontEnumProc(const LOGFONTW* lf, const TEXTMETRICW* tm,
 
 static void PopulateFonts() {
     g_fontList.clear();
-    // 推荐字体置顶（未安装时 DirectWrite 自动 fallback，无需检查）
+    // 推荐字体置顶（现代免费字体优先，未安装时 DWrite 自动 fallback）
     const wchar_t* recommended[] = {
-        L"Segoe UI", L"Consolas", L"Cascadia Code", L"Cascadia Mono",
-        L"JetBrains Mono", L"Microsoft YaHei", L"微软雅黑",
+        L"Inter",              // 现代 UI 无衬线，屏幕优化
+        L"LXGW WenKai",       // 霞鹜文楷，中文楷体风格
+        L"Maple Mono SC",     // 圆润等宽，中文友好
+        L"MiSans",            // 小米出品，现代简洁
+        L"Sarasa UI SC",      // 更纱黑体，中英混排
+        L"Segoe UI",          // Windows 系统默认
+        L"Microsoft YaHei",   // 微软雅黑，中文系统字体
     };
     for (auto* r : recommended) {
         g_fontList.push_back(r);
@@ -328,6 +336,12 @@ static void CreateColorPage(HWND page) {
         BS_AUTOCHECKBOX | WS_TABSTOP, 15, y, 250, 22, IDC_NET_SPLIT_CHECK);
     SendMessageW(hSplit, BM_SETCHECK, dc.netColorSplit ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(hSplit, WM_SETFONT, (WPARAM)g_hUiFont, TRUE);
+    y += 28;
+
+    // 自定义颜色按钮（打开系统色盘）
+    HWND hCustom = CreateCtrl(page, L"BUTTON", L"自定义颜色...",
+        BS_PUSHBUTTON | WS_TABSTOP, 15, y, 100, 24, IDC_CUSTOM_COLOR);
+    SendMessageW(hCustom, WM_SETFONT, (WPARAM)g_hUiFont, TRUE);
 }
 
 static void CreateTempPage(HWND page) {
@@ -516,6 +530,24 @@ static void HandleCommand(HWND hDlg, int id, int code) {
     if ((id == IDC_NET_SPLIT_CHECK || id == IDC_NET_SPLIT_CHECK2) && code == BN_CLICKED) {
         dc.netColorSplit = (IsDlgButtonChecked(g_hPage[TAB_COLOR], IDC_NET_SPLIT_CHECK) == BST_CHECKED);
         changed = true;
+    }
+
+    // 自定义颜色（系统色盘）
+    if (id == IDC_CUSTOM_COLOR && code == BN_CLICKED) {
+        static COLORREF customColors[16] = {};  // 用户自定义色缓存
+        CHOOSECOLORW cc{};
+        cc.lStructSize = sizeof(cc);
+        cc.hwndOwner = g_hDlg;
+        cc.rgbResult = RGB((dc.textColor >> 16) & 0xFF, (dc.textColor >> 8) & 0xFF, dc.textColor & 0xFF);
+        cc.lpCustColors = customColors;
+        cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+        if (ChooseColorW(&cc)) {
+            dc.textColor = 0xFF000000u
+                | ((uint32_t)GetRValue(cc.rgbResult) << 16)
+                | ((uint32_t)GetGValue(cc.rgbResult) << 8)
+                | (uint32_t)GetBValue(cc.rgbResult);
+            changed = true;
+        }
     }
 
     // 温度页
