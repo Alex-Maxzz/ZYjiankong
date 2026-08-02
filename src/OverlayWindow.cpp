@@ -447,9 +447,30 @@ void OverlayWindow::Render() {
 
     m_d2dContext->BeginDraw();
     m_d2dContext->Clear(D2D1::ColorF(0, 0, 0, 0));
+    // 透明窗口必须用灰度抗锯齿，ClearType 在透明背景上产生彩色毛边
+    m_d2dContext->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
     SystemMetrics m = Monitor::Instance().GetSnapshot();
-    DrawMetrics(m_d2dContext, m);
+
+    // 应用整体透明度
+    if (m_config.overlayOpacity < 0.99f) {
+        ID2D1Layer* layer = nullptr;
+        m_d2dContext->CreateLayer(nullptr, &layer);
+        if (layer) {
+            D2D1_LAYER_PARAMETERS1 lp = D2D1::LayerParameters1(
+                D2D1::InfiniteRect(), nullptr,
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(),
+                m_config.overlayOpacity);
+            m_d2dContext->PushLayer(lp, layer);
+            DrawMetrics(m_d2dContext, m);
+            m_d2dContext->PopLayer();
+            layer->Release();
+        } else {
+            DrawMetrics(m_d2dContext, m);
+        }
+    } else {
+        DrawMetrics(m_d2dContext, m);
+    }
 
     HRESULT hrEnd = m_d2dContext->EndDraw();
     if (hrEnd == D2DERR_RECREATE_TARGET || hrEnd == D2DERR_WRONG_STATE) {

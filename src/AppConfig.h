@@ -33,6 +33,7 @@ struct DisplayConfig {
 
     // 布局
     float    spacingScale      = 1.0f;    // 项间距倍率 (0.8~1.5)
+    float    overlayOpacity    = 1.0f;    // 整体透明度 (0.3~1.0)
 
     bool hideOnFullscreen = true;        // 全屏时自动隐藏
     bool runOnStartup     = false;       // 开机启动

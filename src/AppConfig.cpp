@@ -109,6 +109,7 @@ bool AppConfig::Load() {
     m_cfg.tempLowThreshold  = getFloat("tempLowThreshold", 45.0f);
     m_cfg.tempHighThreshold = getFloat("tempHighThreshold", 90.0f);
     m_cfg.spacingScale      = getFloat("spacingScale", 1.0f);
+    m_cfg.overlayOpacity    = getFloat("overlayOpacity", 1.0f);
 
     m_cfg.hideOnFullscreen = getBool("hideOnFullscreen", true);
     m_cfg.runOnStartup     = IsStartupEnabled();
@@ -158,6 +159,7 @@ bool AppConfig::Save() {
         "  \"tempLowThreshold\": %.1f,\n"
         "  \"tempHighThreshold\": %.1f,\n"
         "  \"spacingScale\": %.2f,\n"
+        "  \"overlayOpacity\": %.2f,\n"
         "  \"hideOnFullscreen\": %s,\n"
         "  \"runOnStartup\": %s\n"
         "}\n",
@@ -181,6 +183,7 @@ bool AppConfig::Save() {
         m_cfg.tempLowThreshold,
         m_cfg.tempHighThreshold,
         m_cfg.spacingScale,
+        m_cfg.overlayOpacity,
         m_cfg.hideOnFullscreen ? "true" : "false",
         m_cfg.runOnStartup     ? "true" : "false");
 
