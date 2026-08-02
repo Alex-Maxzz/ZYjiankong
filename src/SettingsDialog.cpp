@@ -534,7 +534,7 @@ void SettingsDialog::Show(HWND owner) {
     RegisterClassExW(&wc);
 
     int x=(GetSystemMetrics(SM_CXSCREEN)-KW)/2, y=(GetSystemMetrics(SM_CYSCREEN)-KH)/2;
-    g_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_LAYERED, L"TSSettingsV2", L"",
+    g_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"TSSettingsV2", L"",
         WS_POPUP|WS_VISIBLE, x, y, KW, KH, owner, nullptr, wc.hInstance, nullptr);
     if (!g_hwnd) return;
 
