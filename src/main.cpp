@@ -344,7 +344,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR cmdLine, int) {
 
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
-    icc.dwICC  = ICC_STANDARD_CLASSES;
+    icc.dwICC  = ICC_STANDARD_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icc);
 
     // 加载配置
