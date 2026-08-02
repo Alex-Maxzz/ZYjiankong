@@ -50,7 +50,7 @@ public:
     const DisplayConfig& Get() const { return m_cfg; }
     void Set(const DisplayConfig& cfg) { m_cfg = cfg; }
 
-    // 开机启动（注册表 HKCU\Software\Microsoft\Windows\CurrentVersion\Run）
+    // 开机启动（任务计划程序，以最高权限运行，绕过 UAC）
     bool IsStartupEnabled();
     bool EnableStartup(bool enable);
 
