@@ -45,8 +45,6 @@ private:
     Monitor(const Monitor&) = delete;
     Monitor& operator=(const Monitor&) = delete;
 
-    void CollectLoop();
-
     // 各采集器
     void CollectCpuUsage();
     void CollectCpuTemp();          // WMI 慢速
@@ -74,10 +72,19 @@ private:
     // 网络速率差值计算
     uint64_t m_prevNetUp{0};
     uint64_t m_prevNetDown{0};
+    bool     m_netFirstSample{true};  // 首次采样只记录基准，不计算速率
     std::chrono::steady_clock::time_point m_prevNetTime;
 
     // 慢速指标时间戳
     std::chrono::steady_clock::time_point m_prevSlowTime;
+
+    // HTTP 温度源失败缓存（避免每秒重试阻塞循环）
+    std::chrono::steady_clock::time_point m_lhmFailTime{};
+    bool     m_lhmFailed{false};
+
+    // 温度连续失败计数（超过阈值重置为 -1，防止显示冻结值）
+    int      m_tempFailCount{0};
+    static constexpr int kTempFailMax = 10;  // 连续 10 次失败后重置
 
     // WMI 句柄
     IWbemLocator*  m_wmiLocator{nullptr};

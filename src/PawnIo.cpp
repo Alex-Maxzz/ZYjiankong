@@ -180,7 +180,6 @@ void PawnIo::DetectTempOffset() {
     }
 
     // 找最佳候选：在温度范围内且两次读数不同
-    float bestVal = -1;
     int bestIdx = 8;
     bool bestHigh = true;
     float bestDist = 999;
@@ -199,7 +198,6 @@ void PawnIo::DetectTempOffset() {
                 float dist = fabsf(v1 - 60.0f);
                 if (dist < bestDist) {
                     bestDist = dist;
-                    bestVal = v1;
                     bestIdx = i;
                     bestHigh = (half == 1);
                 }

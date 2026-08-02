@@ -16,6 +16,14 @@ struct DisplayConfig {
     uint32_t textColor   = 0xFFFFFFFF;   // RGBA
     uint32_t accentColor = 0xFF4A90E2;   // 蓝色强调
 
+    // 美学增强
+    bool     showIndicatorDots  = true;  // 彩色状态指示点
+    bool     tempColorGradient  = true;  // 温度数值随温度变色
+    bool     netColorSplit      = true;  // 网络上下行异色
+    bool     showSeparator      = true;  // 项间分隔符
+    uint32_t netUpColor         = 0xFFFF8C00;   // 上行橙色
+    uint32_t netDownColor       = 0xFF00CED1;   // 下行青色
+
     bool hideOnFullscreen = true;        // 全屏时自动隐藏
     bool runOnStartup     = false;       // 开机启动
 };

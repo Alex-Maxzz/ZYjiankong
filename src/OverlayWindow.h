@@ -18,7 +18,14 @@ struct OverlayConfig {
     float    fontSize    = 12.0f;       // 紧凑字号
     uint32_t textColor   = 0xFFFFFFFF;  // RGBA 文字颜色
     uint32_t accentColor = 0xFF4A90E2;  // 强调色（箭头/状态点）
-    bool     showIndicatorDots = false; // 是否显示彩色状态点
+
+    // 美学增强
+    bool     showIndicatorDots  = true;  // 彩色状态指示点
+    bool     tempColorGradient  = true;  // 温度数值随温度变色
+    bool     netColorSplit      = true;  // 网络上下行异色
+    bool     showSeparator      = true;  // 项间分隔符
+    uint32_t netUpColor         = 0xFFFF8C00;   // 上行橙色
+    uint32_t netDownColor       = 0xFF00CED1;   // 下行青色
 
     // 位置
     bool alignRight = true;   // 右对齐（靠托盘区）
@@ -70,6 +77,16 @@ private:
                       ID2D1Brush* brush, IDWriteTextFormat* fmt,
                       float fontSizePx, float padX, float& x, float y);
 
+    // 工具：温度映射到颜色（冷→热：绿→黄→橙→红）
+    static D2D1_COLOR_F TempToColor(float temp);
+    // 工具：绘制彩色指示点
+    void DrawDot(ID2D1DeviceContext* ctx, float cx, float cy, float radius,
+                 D2D1_COLOR_F color);
+    // 工具：绘制竖线分隔符
+    void DrawSeparator(ID2D1DeviceContext* ctx, float x, float top, float bottom);
+    // 工具：RGBA uint32 → D2D1_COLOR_F
+    static D2D1_COLOR_F UintToColorF(uint32_t rgba);
+
     // 窗口过程
     static LRESULT CALLBACK WndProcStatic(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp);
@@ -106,6 +123,10 @@ private:
     ID2D1SolidColorBrush*   m_brushText{nullptr};
     ID2D1SolidColorBrush*   m_brushAccent{nullptr};
     ID2D1SolidColorBrush*   m_brushBg{nullptr};
+    ID2D1SolidColorBrush*   m_brushNetUp{nullptr};      // 网络上行色
+    ID2D1SolidColorBrush*   m_brushNetDown{nullptr};    // 网络下行色
+    ID2D1SolidColorBrush*   m_brushSeparator{nullptr};  // 分隔符半透明
+    ID2D1SolidColorBrush*   m_brushTempHot{nullptr};    // 高温红
 
     // DirectComposition
     IDCompositionDevice*    m_dcompDevice{nullptr};

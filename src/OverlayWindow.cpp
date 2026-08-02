@@ -64,9 +64,9 @@ bool OverlayWindow::Create(const OverlayConfig& config) {
 
     m_dpi = GetDpiForWindow(m_hwnd);
 
-    if (!InitD3D()) return false;
-    if (!InitD2D()) return false;
-    if (!InitComposition()) return false;
+    if (!InitD3D()) { ReleaseAll(); return false; }
+    if (!InitD2D()) { ReleaseAll(); return false; }
+    if (!InitComposition()) { ReleaseAll(); return false; }
 
     UpdatePosition();
     ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
@@ -85,11 +85,12 @@ void OverlayWindow::BringToTop() {
 }
 
 void OverlayWindow::Destroy() {
-    ReleaseAll();
+    // 先销毁窗口（阻止后续消息分发），再释放 COM 资源
     if (m_hwnd) {
         DestroyWindow(m_hwnd);
         m_hwnd = nullptr;
     }
+    ReleaseAll();
     UnregisterClassW(kOverlayClassName, GetModuleHandleW(nullptr));
 }
 
@@ -166,27 +167,27 @@ bool OverlayWindow::CreateFontsAndBrushes() {
 
     // 画刷（仅创建一次，颜色变化时 SetColor）
     if (!m_brushText) {
-        D2D1_COLOR_F cText = {
-            ((m_config.textColor >> 16) & 0xFF) / 255.0f,
-            ((m_config.textColor >> 8) & 0xFF) / 255.0f,
-            (m_config.textColor & 0xFF) / 255.0f,
-            ((m_config.textColor >> 24) & 0xFF) / 255.0f };
-        m_d2dContext->CreateSolidColorBrush(cText, &m_brushText);
+        m_d2dContext->CreateSolidColorBrush(UintToColorF(m_config.textColor), &m_brushText);
     }
     if (!m_brushAccent) {
-        D2D1_COLOR_F cAccent = {
-            ((m_config.accentColor >> 16) & 0xFF) / 255.0f,
-            ((m_config.accentColor >> 8) & 0xFF) / 255.0f,
-            (m_config.accentColor & 0xFF) / 255.0f,
-            ((m_config.accentColor >> 24) & 0xFF) / 255.0f };
-        m_d2dContext->CreateSolidColorBrush(cAccent, &m_brushAccent);
+        m_d2dContext->CreateSolidColorBrush(UintToColorF(m_config.accentColor), &m_brushAccent);
     }
     if (!m_brushBg) {
         D2D1_COLOR_F cBg = { 0, 0, 0, 0 };
         m_d2dContext->CreateSolidColorBrush(cBg, &m_brushBg);
     }
+    if (!m_brushNetUp) {
+        m_d2dContext->CreateSolidColorBrush(UintToColorF(m_config.netUpColor), &m_brushNetUp);
+    }
+    if (!m_brushNetDown) {
+        m_d2dContext->CreateSolidColorBrush(UintToColorF(m_config.netDownColor), &m_brushNetDown);
+    }
+    if (!m_brushSeparator) {
+        m_d2dContext->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.2f), &m_brushSeparator);
+    }
 
-    return m_textFormat && m_monoFormat && m_brushText && m_brushAccent;
+    return m_textFormat && m_monoFormat && m_brushText && m_brushAccent &&
+           m_brushNetUp && m_brushNetDown;
 }
 
 bool OverlayWindow::InitComposition() {
@@ -211,7 +212,7 @@ bool OverlayWindow::InitComposition() {
     scd.BufferCount = 2;
     scd.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     scd.AlphaMode   = DXGI_ALPHA_MODE_PREMULTIPLIED;
-    scd.Flags       = DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
+    scd.Flags       = 0;  // 不做 GDI 绘制，无需 GDI_COMPATIBLE
 
     IDXGIFactory2* dxgiFactory = nullptr;
     IDXGIAdapter* adapter = nullptr;
@@ -237,6 +238,9 @@ void OverlayWindow::ReleaseAll() {
     // 释放顺序：依赖方在前
     if (m_d2dBitmap)    { m_d2dBitmap->Release();    m_d2dBitmap = nullptr; }
     if (m_brushBg)      { m_brushBg->Release();      m_brushBg = nullptr; }
+    if (m_brushSeparator){ m_brushSeparator->Release(); m_brushSeparator = nullptr; }
+    if (m_brushNetDown) { m_brushNetDown->Release();  m_brushNetDown = nullptr; }
+    if (m_brushNetUp)   { m_brushNetUp->Release();    m_brushNetUp = nullptr; }
     if (m_brushAccent)  { m_brushAccent->Release();  m_brushAccent = nullptr; }
     if (m_brushText)    { m_brushText->Release();    m_brushText = nullptr; }
     if (m_monoFormat)   { m_monoFormat->Release();   m_monoFormat = nullptr; }
@@ -268,12 +272,63 @@ void OverlayWindow::UpdatePosition() {
 
     m_taskbarHeight = rc.bottom - rc.top;
 
-    // 估算内容宽度（紧凑布局）
+    // 动态宽度：根据启用的显示项估算内容宽度
     float fontSizePx = m_config.fontSize * m_dpi / 96.0f;
-    int contentWidth = static_cast<int>(fontSizePx * 28);
-    int padding = 8;
+    float charWidth = fontSizePx * 0.62f;   // 等宽字体近似字符宽度
+    float padX = 8.0f * m_dpi / 96.0f;
+    float itemGap = padX * 1.2f;
+    float dotR = fontSizePx * 0.18f;
+    float dotGap = padX * 0.3f;
+    float sepGap = padX * 0.8f;
 
-    int width  = contentWidth + padding * 2;
+    float contentW = 0.0f;
+    int groups = 0;
+
+    // CPU 组
+    bool hasCpu = m_config.showCpuTemp || m_config.showCpuUsage;
+    if (hasCpu) {
+        if (m_config.showIndicatorDots) contentW += dotR * 2 + dotGap;
+        if (m_config.showCpuTemp)  contentW += 6 * charWidth;  // "CPU047°"
+        if (m_config.showCpuUsage) contentW += 4 * charWidth;  // "078%"
+        contentW += itemGap;
+        groups++;
+    }
+
+    // GPU 组
+    bool hasGpu = m_config.showGpuTemp || m_config.showGpuUsage;
+    if (hasGpu) {
+        if (m_config.showIndicatorDots) contentW += dotR * 2 + dotGap;
+        if (m_config.showGpuTemp)  contentW += 6 * charWidth;
+        if (m_config.showGpuUsage) contentW += 4 * charWidth;
+        contentW += itemGap;
+        groups++;
+    }
+
+    // 内存
+    if (m_config.showMemUsage) {
+        if (m_config.showIndicatorDots) contentW += dotR * 2 + dotGap;
+        contentW += 7 * charWidth;  // "RAM078%"
+        contentW += itemGap;
+        groups++;
+    }
+
+    // 网络
+    bool hasNet = m_config.showNetUp || m_config.showNetDown;
+    if (hasNet) {
+        if (m_config.showIndicatorDots) contentW += dotR * 2 + dotGap;
+        if (m_config.showNetUp)   contentW += 6 * charWidth;  // "↑1.2K "
+        if (m_config.showNetDown) contentW += 6 * charWidth;  // "↓1.2K "
+        contentW += itemGap;
+        groups++;
+    }
+
+    // 分隔符宽度
+    if (m_config.showSeparator && groups > 1) {
+        contentW += (groups - 1) * sepGap;
+    }
+
+    int width = static_cast<int>(contentW + padX * 2);
+    if (width < 20) width = 20;
     int height = m_taskbarHeight;
 
     // 固定在最左边，紧贴任务栏左边缘
@@ -324,20 +379,16 @@ void OverlayWindow::SetConfig(const OverlayConfig& config) {
     if (m_monoFormat) { m_monoFormat->Release(); m_monoFormat = nullptr; }
     // 仅更新画刷颜色（不重建设备）
     if (m_brushText && m_d2dContext) {
-        D2D1_COLOR_F cText = {
-            ((m_config.textColor >> 16) & 0xFF) / 255.0f,
-            ((m_config.textColor >> 8) & 0xFF) / 255.0f,
-            (m_config.textColor & 0xFF) / 255.0f,
-            ((m_config.textColor >> 24) & 0xFF) / 255.0f };
-        m_brushText->SetColor(cText);
+        m_brushText->SetColor(UintToColorF(m_config.textColor));
     }
     if (m_brushAccent && m_d2dContext) {
-        D2D1_COLOR_F cAccent = {
-            ((m_config.accentColor >> 16) & 0xFF) / 255.0f,
-            ((m_config.accentColor >> 8) & 0xFF) / 255.0f,
-            (m_config.accentColor & 0xFF) / 255.0f,
-            ((m_config.accentColor >> 24) & 0xFF) / 255.0f };
-        m_brushAccent->SetColor(cAccent);
+        m_brushAccent->SetColor(UintToColorF(m_config.accentColor));
+    }
+    if (m_brushNetUp) {
+        m_brushNetUp->SetColor(UintToColorF(m_config.netUpColor));
+    }
+    if (m_brushNetDown) {
+        m_brushNetDown->SetColor(UintToColorF(m_config.netDownColor));
     }
     CreateFontsAndBrushes();
     UpdatePosition();
@@ -389,10 +440,12 @@ void OverlayWindow::Render() {
     DrawMetrics(m_d2dContext, m);
 
     HRESULT hrEnd = m_d2dContext->EndDraw();
-    if (hrEnd == D2DERR_RECREATE_TARGET) {
-        // 设备丢失，释放 bitmap 待下次重建
-        m_d2dContext->SetTarget(nullptr);
-        if (m_d2dBitmap) { m_d2dBitmap->Release(); m_d2dBitmap = nullptr; }
+    if (hrEnd == D2DERR_RECREATE_TARGET || hrEnd == D2DERR_WRONG_STATE) {
+        // 设备丢失（TDR/驱动崩溃）：完整重建渲染管线
+        ReleaseAll();
+        if (InitD3D() && InitD2D() && InitComposition()) {
+            UpdatePosition();
+        }
         return;
     }
 
@@ -407,56 +460,127 @@ void OverlayWindow::DrawMetrics(ID2D1DeviceContext* ctx, const SystemMetrics& me
     RECT rc;
     GetClientRect(m_hwnd, &rc);
     float y = (rc.top + rc.bottom) / 2.0f - fontSizePx / 2.0f;
+    float centerY = (rc.top + rc.bottom) / 2.0f;
 
-    // 左对齐布局：从左往右画，统一项间距
+    // 左对齐布局：从左往右画
     float x = padX;
-    float itemGap = padX * 1.2f;   // 各大项之间的间隔
-    float labelGap = padX * 0.15f; // 标签与数值之间的间隔（紧贴）
+    float itemGap = padX * 1.2f;
+    float labelGap = padX * 0.15f;
+    float dotR = fontSizePx * 0.18f;
+    float dotGap = padX * 0.3f;
+    float sepGap = padX * 0.8f;
 
-    // === CPU ===（温度 + 占用率）
-    if (m_config.showCpuTemp && metrics.cpuTemp > 0) {
-        std::wstring txt = L"CPU" + FormatTemp(metrics.cpuTemp);
-        DrawTextLeft(ctx, txt, m_brushText, m_monoFormat, fontSizePx, labelGap, x, y);
-    }
-    if (m_config.showCpuUsage) {
-        std::wstring txt;
-        // 如果温度已显示，占用率不再重复 "CPU" 前缀
-        if (m_config.showCpuTemp && metrics.cpuTemp > 0)
-            txt = FormatPercent(metrics.cpuUsage);
-        else
-            txt = L"CPU" + FormatPercent(metrics.cpuUsage);
-        DrawTextLeft(ctx, txt, m_brushText, m_monoFormat, fontSizePx, labelGap, x, y);
-    }
-    if (m_config.showCpuUsage || (m_config.showCpuTemp && metrics.cpuTemp > 0))
+    // 指示点颜色：蓝=CPU / 绿=GPU / 橙=RAM / 紫=NET
+    D2D1_COLOR_F dotCpu = D2D1::ColorF(0.29f, 0.56f, 0.89f, 1.0f);
+    D2D1_COLOR_F dotGpu = D2D1::ColorF(0.0f, 0.78f, 0.33f, 1.0f);
+    D2D1_COLOR_F dotRam = D2D1::ColorF(1.0f, 0.55f, 0.0f, 1.0f);
+    D2D1_COLOR_F dotNet = D2D1::ColorF(0.67f, 0.29f, 0.74f, 1.0f);
+
+    bool prevGroupDrawn = false;
+
+    // 分隔符 lambda：前一组有内容时才画
+    auto drawSep = [&]() {
+        if (m_config.showSeparator && prevGroupDrawn) {
+            float sepX = x;
+            DrawSeparator(ctx, sepX, centerY - fontSizePx * 0.35f,
+                          centerY + fontSizePx * 0.35f);
+            x += sepGap;
+        }
+    };
+
+    // 温度画刷 lambda：色阶开启时返回临时变色的 m_brushAccent
+    auto getTempBrush = [&](float temp) -> ID2D1Brush* {
+        if (m_config.tempColorGradient && temp > 0 && m_brushAccent) {
+            m_brushAccent->SetColor(TempToColor(temp));
+            return m_brushAccent;
+        }
+        return m_brushText;
+    };
+    auto restoreAccent = [&]() {
+        m_brushAccent->SetColor(UintToColorF(m_config.accentColor));
+    };
+
+    // === CPU ===
+    bool hasCpu = (m_config.showCpuTemp && metrics.cpuTemp > 0) || m_config.showCpuUsage;
+    if (hasCpu) {
+        drawSep();
+        if (m_config.showIndicatorDots) {
+            DrawDot(ctx, x + dotR, centerY, dotR, dotCpu);
+            x += dotR * 2 + dotGap;
+        }
+        if (m_config.showCpuTemp && metrics.cpuTemp > 0) {
+            ID2D1Brush* b = getTempBrush(metrics.cpuTemp);
+            std::wstring txt = L"CPU" + FormatTemp(metrics.cpuTemp);
+            DrawTextLeft(ctx, txt, b, m_monoFormat, fontSizePx, labelGap, x, y);
+            restoreAccent();
+        }
+        if (m_config.showCpuUsage) {
+            std::wstring txt;
+            if (m_config.showCpuTemp && metrics.cpuTemp > 0)
+                txt = FormatPercent(metrics.cpuUsage);
+            else
+                txt = L"CPU" + FormatPercent(metrics.cpuUsage);
+            DrawTextLeft(ctx, txt, m_brushText, m_monoFormat, fontSizePx, labelGap, x, y);
+        }
         x += itemGap;
+        prevGroupDrawn = true;
+    }
 
-    // === GPU ===（NVAPI 真实温度+占用率）
-    if (m_config.showGpuTemp) {
-        std::wstring txt = L"GPU" + FormatTemp(metrics.gpuTemp);
-        DrawTextLeft(ctx, txt, m_brushText, m_monoFormat, fontSizePx, labelGap, x, y);
+    // === GPU ===
+    bool hasGpu = m_config.showGpuTemp || m_config.showGpuUsage;
+    if (hasGpu) {
+        drawSep();
+        if (m_config.showIndicatorDots) {
+            DrawDot(ctx, x + dotR, centerY, dotR, dotGpu);
+            x += dotR * 2 + dotGap;
+        }
+        if (m_config.showGpuTemp) {
+            ID2D1Brush* b = getTempBrush(metrics.gpuTemp);
+            std::wstring txt = L"GPU" + FormatTemp(metrics.gpuTemp);
+            DrawTextLeft(ctx, txt, b, m_monoFormat, fontSizePx, labelGap, x, y);
+            restoreAccent();
+        }
+        if (m_config.showGpuUsage) {
+            std::wstring txt = FormatPercent(metrics.gpuUsage);
+            DrawTextLeft(ctx, txt, m_brushText, m_monoFormat, fontSizePx, labelGap, x, y);
+        }
+        x += itemGap;
+        prevGroupDrawn = true;
     }
-    if (m_config.showGpuUsage) {
-        std::wstring txt = FormatPercent(metrics.gpuUsage);
-        DrawTextLeft(ctx, txt, m_brushText, m_monoFormat, fontSizePx, labelGap, x, y);
-    }
-    if (m_config.showGpuTemp || m_config.showGpuUsage) x += itemGap;
 
     // === 内存 ===
     if (m_config.showMemUsage) {
+        drawSep();
+        if (m_config.showIndicatorDots) {
+            DrawDot(ctx, x + dotR, centerY, dotR, dotRam);
+            x += dotR * 2 + dotGap;
+        }
         std::wstring txt = L"RAM" + FormatPercent(metrics.memUsage);
         DrawTextLeft(ctx, txt, m_brushText, m_monoFormat, fontSizePx, labelGap, x, y);
         x += itemGap;
+        prevGroupDrawn = true;
     }
 
-    // === 网络（↑↓ 紧贴数值）===
-    if (m_config.showNetUp) {
-        // ↑紧贴数值，无间隔
-        std::wstring txt = L"\u2191" + FormatRate(metrics.netUpload);
-        DrawTextLeft(ctx, txt, m_brushAccent, m_monoFormat, fontSizePx, 0, x, y);
-    }
-    if (m_config.showNetDown) {
-        std::wstring txt = L"\u2193" + FormatRate(metrics.netDownload);
-        DrawTextLeft(ctx, txt, m_brushAccent, m_monoFormat, fontSizePx, 0, x, y);
+    // === 网络（↑↓ 紧贴数值，异色区分方向）===
+    bool hasNet = m_config.showNetUp || m_config.showNetDown;
+    if (hasNet) {
+        drawSep();
+        if (m_config.showIndicatorDots) {
+            DrawDot(ctx, x + dotR, centerY, dotR, dotNet);
+            x += dotR * 2 + dotGap;
+        }
+        ID2D1Brush* upBrush   = m_config.netColorSplit ? m_brushNetUp   : m_brushAccent;
+        ID2D1Brush* downBrush = m_config.netColorSplit ? m_brushNetDown : m_brushAccent;
+        if (m_config.showNetUp) {
+            std::wstring txt = L"\u2191" + FormatRate(metrics.netUpload);
+            DrawTextLeft(ctx, txt, upBrush, m_monoFormat, fontSizePx, 0, x, y);
+        }
+        if (m_config.showNetDown) {
+            std::wstring txt = L"\u2193" + FormatRate(metrics.netDownload);
+            DrawTextLeft(ctx, txt, downBrush, m_monoFormat, fontSizePx, 0, x, y);
+        }
+        x += itemGap;
+        prevGroupDrawn = true;
     }
 }
 
@@ -475,6 +599,52 @@ void OverlayWindow::DrawTextLeft(ID2D1DeviceContext* ctx, const std::wstring& te
         D2D1_DRAW_TEXT_OPTIONS_NONE);
     layout->Release();
     x += tm.width + padX * 0.3f;
+}
+
+// ============================================================
+//  辅助方法
+// ============================================================
+
+D2D1_COLOR_F OverlayWindow::UintToColorF(uint32_t rgba) {
+    return D2D1::ColorF(
+        ((rgba >> 16) & 0xFF) / 255.0f,
+        ((rgba >> 8) & 0xFF) / 255.0f,
+        (rgba & 0xFF) / 255.0f,
+        ((rgba >> 24) & 0xFF) / 255.0f);
+}
+
+D2D1_COLOR_F OverlayWindow::TempToColor(float temp) {
+    // 温度色阶：< 50°C 绿 → 50-70°C 黄 → 70-85°C 橙 → > 85°C 红
+    if (temp < 0) return D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
+    if (temp < 50.0f) {
+        return D2D1::ColorF(0.0f, 1.0f, 0.4f, 1.0f);       // 绿
+    } else if (temp < 70.0f) {
+        float t = (temp - 50.0f) / 20.0f;                    // 绿→黄
+        return D2D1::ColorF(t, 1.0f, 0.4f * (1.0f - t), 1.0f);
+    } else if (temp < 85.0f) {
+        float t = (temp - 70.0f) / 15.0f;                    // 黄→橙
+        return D2D1::ColorF(1.0f, 1.0f - t * 0.5f, 0.0f, 1.0f);
+    } else {
+        return D2D1::ColorF(1.0f, 0.2f, 0.0f, 1.0f);        // 红
+    }
+}
+
+void OverlayWindow::DrawDot(ID2D1DeviceContext* ctx, float cx, float cy,
+                            float radius, D2D1_COLOR_F color) {
+    // 借用 m_brushAccent 临时换色画点，画完恢复
+    if (!m_brushAccent) return;
+    D2D1_COLOR_F orig = m_brushAccent->GetColor();
+    m_brushAccent->SetColor(color);
+    D2D1_ELLIPSE ellipse = D2D1::Ellipse(D2D1::Point2F(cx, cy), radius, radius);
+    ctx->FillEllipse(ellipse, m_brushAccent);
+    m_brushAccent->SetColor(orig);
+}
+
+void OverlayWindow::DrawSeparator(ID2D1DeviceContext* ctx, float x,
+                                   float top, float bottom) {
+    if (!m_brushSeparator) return;
+    ctx->DrawLine(D2D1::Point2F(x, top), D2D1::Point2F(x, bottom),
+        m_brushSeparator, 1.0f, nullptr);
 }
 
 // ============================================================
@@ -546,6 +716,6 @@ LRESULT OverlayWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             PostQuitMessage(0);
             return 0;
         default:
-            return DefWindowProcW(m_hwnd, msg, wp, lp);
+            return m_hwnd ? DefWindowProcW(m_hwnd, msg, wp, lp) : 0;
     }
 }
