@@ -336,8 +336,8 @@ static void Render() {
     g_rt->BeginDraw();
     g_rt->Clear(C(T::kBg));
     g_rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    // DPI 缩放：所有坐标按 96 DPI 设计，统一缩放
-    g_rt->SetTransform(D2D1::Matrix3x2F::Scale(g_dpiScale, g_dpiScale));
+    // 注意：不要加 SetTransform(Scale)！D2D HwndRT 内部已自动处理 DPI 映射
+    // 所有坐标用 DIP（96 DPI 设计值），D2D 自动映射到物理像素
 
     // 标题栏
     RR(0, 0, (float)BASE_W, (float)TITLE_H, 0, T::kTitle);
@@ -566,6 +566,24 @@ void SettingsDialog::Show(HWND owner) {
     fac->CreateHwndRenderTarget(D2D1::RenderTargetProperties(),
         D2D1::HwndRenderTargetProperties(g_hwnd, D2D1::SizeU(rc.right,rc.bottom)), &g_rt);
     fac->Release();
+
+    // DEBUG: 输出实际尺寸到文件
+    {
+        RECT wr; GetWindowRect(g_hwnd, &wr);
+        FILE* f = fopen("C:\\Users\\15174\\.qoderworkcn\\workspace\\msas4y6m057r6xvk\\settings_debug.txt", "w");
+        if (f) {
+            fprintf(f, "dpiScale=%.2f dpi=%u\n", g_dpiScale, GetDpiForSystem());
+            fprintf(f, "WindowRect: %ldx%ld\n", wr.right-wr.left, wr.bottom-wr.top);
+            fprintf(f, "ClientRect: %ldx%ld\n", rc.right, rc.bottom);
+            fprintf(f, "KW=%d KH=%d BASE_W=%d BASE_H=%d\n", KW, KH, BASE_W, BASE_H);
+            fprintf(f, "CONTENT_Y=%d TITLE_H=%d TAB_H=%d\n", CONTENT_Y, TITLE_H, TAB_H);
+            if (g_rt) {
+                D2D1_SIZE_F sz = g_rt->GetSize();
+                fprintf(f, "RT size: %.0fx%.0f\n", sz.width, sz.height);
+            }
+            fclose(f);
+        }
+    }
 
     // DWrite
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), (IUnknown**)&g_dw);
