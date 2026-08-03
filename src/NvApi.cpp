@@ -67,11 +67,11 @@ bool NvApi::Init() {
     m_fnGetThermal      = reinterpret_cast<NvAPI_GPU_GetThermalSettings_t>(
         queryInterface(NVAPI_ID_THERMAL));
 
-    // 使用 GetUsages 代替 GetPstates（后者在新驱动上不可用）
-    m_fnGetPstates = reinterpret_cast<NvAPI_GPU_GetDynamicPstatesInfoEx_t>(
+    // GetUsages（ID 0x189A1FDF）：获取 GPU 占用率，替代了旧版 GetPstates
+    m_fnGetUsages = reinterpret_cast<NvAPI_GPU_GetUsages_t>(
         queryInterface(NVAPI_ID_USAGES));
 
-    if (!m_fnInitialize || !m_fnEnumPhysicalGPUs || !m_fnGetThermal || !m_fnGetPstates) {
+    if (!m_fnInitialize || !m_fnEnumPhysicalGPUs || !m_fnGetThermal || !m_fnGetUsages) {
         FreeLibrary(m_hNvApi);
         m_hNvApi = nullptr;
         return false;
@@ -120,9 +120,7 @@ bool NvApi::QueryGpu(float& temp, float& usage) {
     // 查询占用率（V1, size=136, usages[2] = GPU 占用率）
     NV_GPU_USAGES usages{};
     usages.version = sizeof(NV_GPU_USAGES) | 0x10000;
-    // 复用 GetPstates 函数指针（实际指向 GetUsages）
-    auto getUsages = reinterpret_cast<int (*)(void*, void*)>(m_fnGetPstates);
-    if (getUsages(m_gpuHandle, &usages) == NVAPI_OK) {
+    if (m_fnGetUsages(m_gpuHandle, &usages) == NVAPI_OK) {
         // usages[2] 是 GPU 引擎占用率
         usage = static_cast<float>(usages.usages[2]);
     }

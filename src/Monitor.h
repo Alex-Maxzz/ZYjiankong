@@ -82,6 +82,11 @@ private:
     std::chrono::steady_clock::time_point m_lhmFailTime{};
     bool     m_lhmFailed{false};
 
+    // WMI 温度查询退避（避免每秒执行耗时的 WMI 查询拖慢主循环）
+    std::chrono::steady_clock::time_point m_wmiTempFailTime{};
+    bool     m_wmiTempFailed{false};
+    static constexpr int kWmiTempRetrySec = 5;  // WMI 温度查询失败后 5 秒内不重试
+
     // 温度连续失败计数（超过阈值重置为 -1，防止显示冻结值）
     int      m_tempFailCount{0};
     static constexpr int kTempFailMax = 10;  // 连续 10 次失败后重置

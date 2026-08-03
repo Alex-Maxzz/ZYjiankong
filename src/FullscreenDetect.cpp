@@ -41,7 +41,6 @@ bool FullscreenDetect::IsFullscreenWindowActive() const {
         wndRect.bottom >= mi.rcMonitor.bottom;
 
     // 进一步排除：窗口必须是顶级窗口、可见、非工具窗口
-    bool isTopmost = (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
     bool isVisible = IsWindowVisible(hwnd);
 
     // 游戏全屏窗口特征：

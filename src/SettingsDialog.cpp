@@ -522,15 +522,6 @@ static void DragSlider(int id, float mx, float my) {
 }
 
 // ===================== 字体枚举 =====================
-static int CALLBACK FontCb(const LOGFONTW* lf, const TEXTMETRICW* tm, DWORD type, LPARAM lp) {
-    if (!(type & TRUETYPE_FONTTYPE)) return 1;
-    if (lf->lfCharSet == SYMBOL_CHARSET || lf->lfFaceName[0] == L'@') return 1;
-    if (tm->tmHeight > 0 && tm->tmInternalLeading > tm->tmHeight/3) return 1;
-    auto* list = (std::vector<std::wstring>*)lp;
-    std::wstring n = lf->lfFaceName;
-    if (std::find(list->begin(), list->end(), n) == list->end()) list->push_back(n);
-    return 1;
-}
 static void LoadFonts() {
     g_fonts.clear();
     // 精选字体列表（适合小字号任务栏显示，不枚举全系统）

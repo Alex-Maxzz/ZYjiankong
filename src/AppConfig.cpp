@@ -131,10 +131,17 @@ bool AppConfig::Save() {
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
 
-    // fontFamily wstring → UTF-8
-    char fontUtf8[256] = "Segoe UI";
-    WideCharToMultiByte(CP_UTF8, 0, m_cfg.fontFamily.c_str(), -1,
-        fontUtf8, sizeof(fontUtf8), nullptr, nullptr);
+    // fontFamily wstring → UTF-8（动态分配，避免固定缓冲区截断）
+    std::string fontUtf8;
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, m_cfg.fontFamily.c_str(), -1,
+        nullptr, 0, nullptr, nullptr);
+    if (utf8Len > 0) {
+        fontUtf8.resize(utf8Len - 1);  // 不含末尾 \0
+        WideCharToMultiByte(CP_UTF8, 0, m_cfg.fontFamily.c_str(), -1,
+            fontUtf8.data(), utf8Len, nullptr, nullptr);
+    } else {
+        fontUtf8 = "Segoe UI";
+    }
 
     char buf[2048];
     int n = snprintf(buf, sizeof(buf),
@@ -179,7 +186,7 @@ bool AppConfig::Save() {
         m_cfg.showSeparator     ? "true" : "false",
         m_cfg.netUpColor,
         m_cfg.netDownColor,
-        fontUtf8,
+        fontUtf8.c_str(),
         m_cfg.tempLowThreshold,
         m_cfg.tempHighThreshold,
         m_cfg.spacingScale,
@@ -188,8 +195,12 @@ bool AppConfig::Save() {
         m_cfg.runOnStartup     ? "true" : "false");
 
     DWORD written = 0;
-    WriteFile(h, buf, static_cast<DWORD>(n), &written, nullptr);
+    BOOL writeOk = WriteFile(h, buf, static_cast<DWORD>(n), &written, nullptr);
     CloseHandle(h);
+
+    if (!writeOk || written != static_cast<DWORD>(n)) {
+        return false;  // 写入不完整，配置可能损坏
+    }
 
     // 仅在开机启动状态变化时写注册表（避免每次 Save 都触发）
     if (IsStartupEnabled() != m_cfg.runOnStartup) {
