@@ -273,57 +273,74 @@ void Monitor::CollectCpuTemp() {
     }
 
     // 方案 3：MSAcpi_ThermalZoneTemperature（Intel 常见）
-    if (temp < 0) {
-        IEnumWbemClassObject* pEnum = nullptr;
-        if (WmiExecuteQuery(L"SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature", &pEnum)) {
-            IWbemClassObject* pObj = nullptr;
-            ULONG ret = 0;
-            while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &ret) == S_OK) {
-                VARIANT v;
-                VariantInit(&v);
-                if (SUCCEEDED(pObj->Get(L"CurrentTemperature", 0, &v, nullptr, nullptr)) &&
-                    v.vt == VT_I4) {
-                    temp = (v.lVal - 2732) / 10.0f;
-                    if (temp < 0 || temp > 150) temp = -1.0f;
-                }
-                VariantClear(&v);
-                pObj->Release();
-                if (temp > 0) break;
-            }
-            pEnum->Release();
-        }
-    }
-
     // 方案 4：ThermalZoneInformation 性能计数器（ACPI 热区）
-    if (temp < 0 && m_wmiServicesCimv2) {
-        IEnumWbemClassObject* pEnum2 = nullptr;
-        HRESULT hr = m_wmiServicesCimv2->ExecQuery(
-            bstr_t("WQL"),
-            bstr_t("SELECT Temperature FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation"),
-            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-            nullptr, &pEnum2);
-        if (SUCCEEDED(hr) && pEnum2) {
-            IWbemClassObject* pObj = nullptr;
-            ULONG ret = 0;
-            while (pEnum2->Next(WBEM_INFINITE, 1, &pObj, &ret) == S_OK) {
-                VARIANT v;
-                VariantInit(&v);
-                if (SUCCEEDED(pObj->Get(L"Temperature", 0, &v, nullptr, nullptr))) {
-                    long long raw = 0;
-                    if (v.vt == VT_I4) raw = v.lVal;
-                    else if (v.vt == VT_I8) raw = v.llVal;
-                    else if (v.vt == VT_BSTR) raw = _wtoi64(v.bstrVal);
-                    else if (v.vt == VT_UI4) raw = static_cast<long long>(v.ulVal);
-                    if (raw > 0) {
-                        float candidate = raw / 10.0f;
-                        if (candidate > 0 && candidate < 150) temp = candidate;
+    // 两个 WMI 查询合并退避：失败后 5 秒内不重试，避免每秒拖慢主循环
+    if (temp < 0) {
+        auto now = std::chrono::steady_clock::now();
+        bool shouldRetry = !m_wmiTempFailed ||
+            (now - m_wmiTempFailTime >= std::chrono::seconds(kWmiTempRetrySec));
+
+        if (shouldRetry) {
+            // 方案 3：MSAcpi_ThermalZoneTemperature（Intel 常见）
+            IEnumWbemClassObject* pEnum = nullptr;
+            if (WmiExecuteQuery(L"SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature", &pEnum)) {
+                IWbemClassObject* pObj = nullptr;
+                ULONG ret = 0;
+                while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &ret) == S_OK) {
+                    VARIANT v;
+                    VariantInit(&v);
+                    if (SUCCEEDED(pObj->Get(L"CurrentTemperature", 0, &v, nullptr, nullptr)) &&
+                        v.vt == VT_I4) {
+                        temp = (v.lVal - 2732) / 10.0f;
+                        if (temp < 0 || temp > 150) temp = -1.0f;
                     }
+                    VariantClear(&v);
+                    pObj->Release();
+                    if (temp > 0) break;
                 }
-                VariantClear(&v);
-                pObj->Release();
-                if (temp > 0) break;
+                pEnum->Release();
             }
-            pEnum2->Release();
+
+            // 方案 4：ThermalZoneInformation 性能计数器（ACPI 热区）
+            if (temp < 0 && m_wmiServicesCimv2) {
+                IEnumWbemClassObject* pEnum2 = nullptr;
+                HRESULT hr = m_wmiServicesCimv2->ExecQuery(
+                    bstr_t("WQL"),
+                    bstr_t("SELECT Temperature FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation"),
+                    WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                    nullptr, &pEnum2);
+                if (SUCCEEDED(hr) && pEnum2) {
+                    IWbemClassObject* pObj = nullptr;
+                    ULONG ret = 0;
+                    while (pEnum2->Next(WBEM_INFINITE, 1, &pObj, &ret) == S_OK) {
+                        VARIANT v;
+                        VariantInit(&v);
+                        if (SUCCEEDED(pObj->Get(L"Temperature", 0, &v, nullptr, nullptr))) {
+                            long long raw = 0;
+                            if (v.vt == VT_I4) raw = v.lVal;
+                            else if (v.vt == VT_I8) raw = v.llVal;
+                            else if (v.vt == VT_BSTR) raw = _wtoi64(v.bstrVal);
+                            else if (v.vt == VT_UI4) raw = static_cast<long long>(v.ulVal);
+                            if (raw > 0) {
+                                float candidate = raw / 10.0f;
+                                if (candidate > 0 && candidate < 150) temp = candidate;
+                            }
+                        }
+                        VariantClear(&v);
+                        pObj->Release();
+                        if (temp > 0) break;
+                    }
+                    pEnum2->Release();
+                }
+            }
+
+            // 两个 WMI 查询都失败：进入退避
+            if (temp < 0) {
+                m_wmiTempFailed = true;
+                m_wmiTempFailTime = now;
+            } else {
+                m_wmiTempFailed = false;
+            }
         }
     }
 

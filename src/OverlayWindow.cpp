@@ -476,8 +476,9 @@ void OverlayWindow::Render() {
     HRESULT hrEnd = m_d2dContext->EndDraw();
     if (hrEnd == D2DERR_RECREATE_TARGET || hrEnd == D2DERR_WRONG_STATE) {
         // 设备丢失（TDR/驱动崩溃）：完整重建渲染管线
-        ReleaseAll();
+        ReleaseAll();   // m_inited 被置为 false
         if (InitD3D() && InitD2D() && InitComposition()) {
+            m_inited = true;   // 重建成功后恢复渲染状态
             UpdatePosition();
         }
         return;

@@ -27,7 +27,7 @@ private:
     using NvAPI_Initialize_t            = int (*)();
     using NvAPI_EnumPhysicalGPUs_t      = int (*)(void** gpuHandles, int* count);
     using NvAPI_GPU_GetThermalSettings_t = int (*)(void* gpu, int sensorIndex, void* settings);
-    using NvAPI_GPU_GetDynamicPstatesInfoEx_t = int (*)(void* gpu, void* pstates);
+    using NvAPI_GPU_GetUsages_t         = int (*)(void* gpu, void* usages);
 
     HMODULE m_hNvApi{nullptr};
     bool    m_inited{false};
@@ -39,5 +39,5 @@ private:
     NvAPI_Initialize_t            m_fnInitialize{nullptr};
     NvAPI_EnumPhysicalGPUs_t      m_fnEnumPhysicalGPUs{nullptr};
     NvAPI_GPU_GetThermalSettings_t m_fnGetThermal{nullptr};
-    NvAPI_GPU_GetDynamicPstatesInfoEx_t m_fnGetPstates{nullptr};
+    NvAPI_GPU_GetUsages_t          m_fnGetUsages{nullptr};
 };
