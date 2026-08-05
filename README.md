@@ -1,5 +1,7 @@
 # TaskbarStudio · 任务栏资源监控悬浮条
 
+> A lightweight Windows taskbar overlay for real-time hardware monitoring — CPU temperature/usage, GPU temperature/usage, RAM, and network upload/download speeds, displayed as a sleek floating bar on your taskbar.
+
 > 一个常驻系统托盘的轻量监控工具：把 **CPU 温度/占用、GPU 温度/占用、内存、网络上下行** 实时显示成任务栏上的一条悬浮条，精确到秒、几乎零打扰。
 
 针对笔记本场景优化（默认适配 **联想拯救者 R7000P 2023：Ryzen 7 7840H + RTX 4060**），只要平台是 **AMD CPU + NVIDIA 独显** 即可工作。
@@ -107,7 +109,7 @@ main.cpp            程序入口：单实例、托盘、菜单、计时器、全
 
 - 本项目专注**资源监控**，不含任务栏美化功能。
 - 仓库目前为**公开（Public）**，欢迎 Issue / PR。
-- License：暂未指定，如需开源协议请自行添加。
+- License：**MIT**，可自由使用、修改、分发。
 
 ---
 
