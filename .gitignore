@@ -20,3 +20,10 @@ CMakeSettings.json
 # OS
 Thumbs.db
 Desktop.ini
+
+# Build logs
+build.log
+*.log
+
+# WorkBuddy
+.workbuddy/
