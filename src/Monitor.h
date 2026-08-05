@@ -7,13 +7,10 @@ struct SystemMetrics {
     // CPU
     float       cpuUsage   = 0.0f;   // 0-100
     float       cpuTemp    = -1.0f;  // 摄氏度，-1 表示无效
-    std::string cpuName;
 
     // GPU
     float       gpuUsage   = -1.0f;  // 0-100，-1 表示无效
     float       gpuTemp    = -1.0f;  // 摄氏度，-1 表示无效
-    std::string gpuName;
-    float       gpuMemUsage= -1.0f;  // 显存占用百分比
 
     // 内存
     uint64_t    memTotal   = 0;      // 字节
@@ -90,6 +87,10 @@ private:
     // 温度连续失败计数（超过阈值重置为 -1，防止显示冻结值）
     int      m_tempFailCount{0};
     static constexpr int kTempFailMax = 10;  // 连续 10 次失败后重置
+
+    // GPU 连续失败计数（同上，防止 NVAPI 失败时显示冻结值）
+    int      m_gpuFailCount{0};
+    static constexpr int kGpuFailMax = 3;  // GPU 5 秒采一次，3 次=15 秒无数据则重置
 
     // WMI 句柄
     IWbemLocator*  m_wmiLocator{nullptr};

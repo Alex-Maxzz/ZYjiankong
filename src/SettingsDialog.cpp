@@ -455,7 +455,7 @@ static void Apply() {
     oc.netUpColor=dc.netUpColor; oc.netDownColor=dc.netDownColor;
     oc.fontFamily=dc.fontFamily; oc.tempLowThreshold=dc.tempLowThreshold;
     oc.tempHighThreshold=dc.tempHighThreshold; oc.spacingScale=dc.spacingScale;
-    oc.overlayOpacity=dc.overlayOpacity; oc.alignRight=false;
+    oc.overlayOpacity=dc.overlayOpacity;
     OverlayWindow::Instance().SetConfig(oc);
 }
 
@@ -566,11 +566,14 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         }
         // 拖动窗口（标题栏区域）
         case WM_NCHITTEST: {
-            float mx = (float)LOWORD(lp), my = (float)HIWORD(lp);
-            // 转换为 client 坐标
+            // 转换为 client 坐标，再除以 dpiScale 得到 DIP 设计坐标
             POINT pt = {LOWORD(lp), HIWORD(lp)};
             ScreenToClient(hw, &pt);
-            if (pt.y < (int)(TITLE_H * g_dpiScale) && pt.x < KW-40) return HTCAPTION;
+            float dipX = pt.x / g_dpiScale;
+            float dipY = pt.y / g_dpiScale;
+            // 标题栏区域（排除关闭按钮）可拖动
+            // 关闭按钮画在 DIP x=[BASE_W-36, BASE_W-6], y=[6, 32]
+            if (dipY < TITLE_H && dipX < BASE_W - 40) return HTCAPTION;
             return HTCLIENT;
         }
         case WM_CLOSE: SettingsDialog::Close(); return 0;
@@ -623,7 +626,10 @@ void SettingsDialog::Show(HWND owner) {
     ID2D1Factory* fac=nullptr;
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &fac);
     RECT rc; GetClientRect(g_hwnd, &rc);
-    fac->CreateHwndRenderTarget(D2D1::RenderTargetProperties(),
+    D2D1_RENDER_TARGET_PROPERTIES rtp = D2D1::RenderTargetProperties();
+    rtp.dpiX = (float)dpi;
+    rtp.dpiY = (float)dpi;
+    fac->CreateHwndRenderTarget(rtp,
         D2D1::HwndRenderTargetProperties(g_hwnd, D2D1::SizeU(rc.right,rc.bottom)), &g_rt);
     fac->Release();
 
