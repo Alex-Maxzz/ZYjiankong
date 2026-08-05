@@ -183,10 +183,6 @@ bool OverlayWindow::CreateFontsAndBrushes() {
     if (!m_brushAccent) {
         m_d2dContext->CreateSolidColorBrush(UintToColorF(m_config.accentColor), &m_brushAccent);
     }
-    if (!m_brushBg) {
-        D2D1_COLOR_F cBg = { 0, 0, 0, 0 };
-        m_d2dContext->CreateSolidColorBrush(cBg, &m_brushBg);
-    }
     if (!m_brushNetUp) {
         m_d2dContext->CreateSolidColorBrush(UintToColorF(m_config.netUpColor), &m_brushNetUp);
     }
@@ -249,7 +245,6 @@ void OverlayWindow::ReleaseAll() {
     // 释放顺序：依赖方在前
     if (m_opLayer)       { m_opLayer->Release();       m_opLayer = nullptr; }
     if (m_d2dBitmap)    { m_d2dBitmap->Release();    m_d2dBitmap = nullptr; }
-    if (m_brushBg)      { m_brushBg->Release();      m_brushBg = nullptr; }
     if (m_brushSeparator){ m_brushSeparator->Release(); m_brushSeparator = nullptr; }
     if (m_brushNetDown) { m_brushNetDown->Release();  m_brushNetDown = nullptr; }
     if (m_brushNetUp)   { m_brushNetUp->Release();    m_brushNetUp = nullptr; }
@@ -289,10 +284,10 @@ void OverlayWindow::UpdatePosition() {
     float fontSizePx = m_config.fontSize * m_dpi / 96.0f;
     float charWidth = fontSizePx * 0.62f;   // 等宽字体近似字符宽度
     float padX = 8.0f * m_dpi / 96.0f;
-    float itemGap = padX * 1.2f;
+    float itemGap = padX * 1.2f * m_config.spacingScale;
     float dotR = fontSizePx * 0.18f;
     float dotGap = padX * 0.3f;
-    float sepGap = padX * 0.8f;
+    float sepGap = padX * 0.8f * m_config.spacingScale;
 
     float contentW = 0.0f;
     int groups = 0;
@@ -497,13 +492,13 @@ void OverlayWindow::DrawMetrics(ID2D1DeviceContext* ctx, const SystemMetrics& me
     float y = (rc.top + rc.bottom) / 2.0f - fontSizePx / 2.0f;
     float centerY = (rc.top + rc.bottom) / 2.0f;
 
-    // 左对齐布局：从左往右画
+    // 左对齐布局：从左往右画（spacingScale 控制组间距）
     float x = padX;
-    float itemGap = padX * 1.2f;
+    float itemGap = padX * 1.2f * m_config.spacingScale;
     float labelGap = padX * 0.15f;
     float dotR = fontSizePx * 0.18f;
     float dotGap = padX * 0.3f;
-    float sepGap = padX * 0.8f;
+    float sepGap = padX * 0.8f * m_config.spacingScale;
 
     // 指示点颜色：蓝=CPU / 绿=GPU / 橙=RAM / 紫=NET
     D2D1_COLOR_F dotCpu = D2D1::ColorF(0.29f, 0.56f, 0.89f, 1.0f);
@@ -654,15 +649,20 @@ D2D1_COLOR_F OverlayWindow::UintToColorF(uint32_t rgba) {
 }
 
 D2D1_COLOR_F OverlayWindow::TempToColor(float temp) {
-    // 温度色阶：< 50°C 绿 → 50-70°C 黄 → 70-85°C 橙 → > 85°C 红
+    // 温度色阶：使用用户配置的阈值
+    // < tempLowThreshold 绿 → 低~高之间黄→橙 → > tempHighThreshold 红
     if (temp < 0) return D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
-    if (temp < 50.0f) {
+    float lo = m_config.tempLowThreshold;
+    float hi = m_config.tempHighThreshold;
+    if (hi <= lo) hi = lo + 1.0f;  // 防止除零
+    float mid = (lo + hi) / 2.0f;
+    if (temp < lo) {
         return D2D1::ColorF(0.0f, 1.0f, 0.4f, 1.0f);       // 绿
-    } else if (temp < 70.0f) {
-        float t = (temp - 50.0f) / 20.0f;                    // 绿→黄
+    } else if (temp < mid) {
+        float t = (temp - lo) / (mid - lo);                 // 绿→黄
         return D2D1::ColorF(t, 1.0f, 0.4f * (1.0f - t), 1.0f);
-    } else if (temp < 85.0f) {
-        float t = (temp - 70.0f) / 15.0f;                    // 黄→橙
+    } else if (temp < hi) {
+        float t = (temp - mid) / (hi - mid);                // 黄→橙
         return D2D1::ColorF(1.0f, 1.0f - t * 0.5f, 0.0f, 1.0f);
     } else {
         return D2D1::ColorF(1.0f, 0.2f, 0.0f, 1.0f);        // 红

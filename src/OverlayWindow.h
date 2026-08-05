@@ -39,9 +39,6 @@ struct OverlayConfig {
     // 布局
     float    spacingScale      = 1.0f;
     float    overlayOpacity    = 1.0f;
-
-    // 位置
-    bool alignRight = true;   // 右对齐（靠托盘区）
 };
 
 class OverlayWindow {
@@ -90,8 +87,8 @@ private:
                       ID2D1Brush* brush, IDWriteTextFormat* fmt,
                       float fontSizePx, float padX, float& x, float y);
 
-    // 工具：温度映射到颜色（冷→热：绿→黄→橙→红）
-    static D2D1_COLOR_F TempToColor(float temp);
+    // 工具：温度映射到颜色（冷→热：绿→黄→橙→红），使用 m_config 阈值
+    D2D1_COLOR_F TempToColor(float temp);
     // 工具：绘制彩色指示点
     void DrawDot(ID2D1DeviceContext* ctx, float cx, float cy, float radius,
                  D2D1_COLOR_F color);
@@ -136,7 +133,6 @@ private:
     // 画刷
     ID2D1SolidColorBrush*   m_brushText{nullptr};
     ID2D1SolidColorBrush*   m_brushAccent{nullptr};
-    ID2D1SolidColorBrush*   m_brushBg{nullptr};
     ID2D1SolidColorBrush*   m_brushNetUp{nullptr};      // 网络上行色
     ID2D1SolidColorBrush*   m_brushNetDown{nullptr};    // 网络下行色
     ID2D1SolidColorBrush*   m_brushSeparator{nullptr};  // 分隔符半透明

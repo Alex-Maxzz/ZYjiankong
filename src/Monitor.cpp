@@ -77,6 +77,7 @@ void Monitor::Stop() {
     if (!m_running.exchange(false)) return;
     if (m_thread.joinable()) m_thread.join();
     PawnIo::Instance().Shutdown();
+    NvApi::Instance().Shutdown();
 }
 
 SystemMetrics Monitor::GetSnapshot() const {
@@ -362,10 +363,19 @@ void Monitor::CollectCpuTemp() {
 
 void Monitor::CollectGpu() {
     float temp = -1.0f, usage = -1.0f;
-    if (NvApi::Instance().QueryGpu(temp, usage)) {
+    bool ok = NvApi::Instance().QueryGpu(temp, usage);
+    if (ok) {
+        m_gpuFailCount = 0;
         std::lock_guard<std::mutex> lock(m_mutex);
         if (temp >= 0)  m_metrics.gpuTemp  = temp;
         if (usage >= 0) m_metrics.gpuUsage = usage;
+    } else {
+        // 连续失败超过阈值：重置为 -1（界面隐藏），防止显示冻结的假数据
+        if (++m_gpuFailCount >= kGpuFailMax) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_metrics.gpuTemp  = -1.0f;
+            m_metrics.gpuUsage = -1.0f;
+        }
     }
 }
 

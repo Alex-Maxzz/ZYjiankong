@@ -103,7 +103,6 @@ static void ApplyConfigToOverlay() {
     oc.tempHighThreshold = dc.tempHighThreshold;
     oc.spacingScale      = dc.spacingScale;
     oc.overlayOpacity    = dc.overlayOpacity;
-    oc.alignRight   = false;
     OverlayWindow::Instance().SetConfig(oc);
 }
 
@@ -397,7 +396,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR cmdLine, int) {
     oc.tempHighThreshold = dc.tempHighThreshold;
     oc.spacingScale      = dc.spacingScale;
     oc.overlayOpacity    = dc.overlayOpacity;
-    oc.alignRight   = false;
     if (!OverlayWindow::Instance().Create(oc)) {
         if (!silent) MessageBoxW(nullptr, L"悬浮窗创建失败", kAppTitle, MB_ICONWARNING);
     }
