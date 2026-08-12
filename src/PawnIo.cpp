@@ -5,6 +5,10 @@
 
 // 资源 ID（app.rc 中定义）
 #define IDR_RYZENSMU_BLOB 200
+#define IDR_PAWNIO_SETUP  201
+
+#include <shellapi.h>
+#pragma comment(lib, "shell32.lib")
 
 PawnIo& PawnIo::Instance() {
     static PawnIo inst;
@@ -42,9 +46,17 @@ bool PawnIo::Init() {
     // 打开 PawnIO 设备（需要管理员权限）
     HRESULT hr = m_fnOpen(&m_handle);
     if (FAILED(hr) || !m_handle) {
-        FreeLibrary(m_hLib);
-        m_hLib = nullptr;
-        return false;
+        // 驱动可能被 Windows 安全更新清除，尝试自动恢复
+        if (!IsDriverInstalled()) {
+            RecoverDriverEmbedded();
+        }
+        // 重试打开
+        hr = m_fnOpen(&m_handle);
+        if (FAILED(hr) || !m_handle) {
+            FreeLibrary(m_hLib);
+            m_hLib = nullptr;
+            return false;
+        }
     }
 
     // 从 EXE 资源加载 RyzenSMU blob
@@ -310,4 +322,176 @@ bool PawnIo::Reinit() {
         m_reinitCooldown = 0;
     }
     return ok;
+}
+
+// ===================== 驱动健康检测与自动恢复 =====================
+
+bool PawnIo::IsDriverInstalled() {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return false;
+    SC_HANDLE svc = OpenServiceW(scm, L"PawnIO", SERVICE_QUERY_STATUS);
+    bool exists = (svc != nullptr);
+    if (svc) CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return exists;
+}
+
+bool PawnIo::RecoverDriverEmbedded() {
+    // 从 EXE 资源提取安装器
+    HRSRC hRes = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_PAWNIO_SETUP), RT_RCDATA);
+    if (!hRes) return false;
+    HGLOBAL hData = LoadResource(nullptr, hRes);
+    if (!hData) return false;
+    DWORD size = SizeofResource(nullptr, hRes);
+    const void* data = LockResource(hData);
+    if (!data || size == 0) return false;
+
+    // 写入临时文件
+    wchar_t tempPath[MAX_PATH], tempFile[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempPath);
+    GetTempFileNameW(tempPath, L"pio", 0, tempFile);
+    std::wstring exePath = std::wstring(tempFile) + L".exe";
+
+    HANDLE hFile = CreateFileW(exePath.c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        DeleteFileW(tempFile);
+        return false;
+    }
+    DWORD written = 0;
+    WriteFile(hFile, data, size, &written, nullptr);
+    CloseHandle(hFile);
+
+    if (written != size) {
+        DeleteFileW(exePath.c_str());
+        DeleteFileW(tempFile);
+        return false;
+    }
+
+    // 静默安装
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = L"open";
+    sei.lpFile = exePath.c_str();
+    sei.lpParameters = L"-install -silent";
+    sei.nShow = SW_HIDE;
+    ShellExecuteExW(&sei);
+
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, 30000);
+        CloseHandle(sei.hProcess);
+    }
+
+    // 清理临时文件
+    DeleteFileW(exePath.c_str());
+    DeleteFileW(tempFile);
+
+    return IsDriverInstalled();
+}
+
+bool PawnIo::RecoverDriverNetwork() {
+    // 使用 WinHTTP 从 GitHub 下载最新安装器
+    HINTERNET hSession = WinHttpOpen(L"TaskbarStudio/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+
+    HINTERNET hConnect = WinHttpConnect(hSession, L"github.com",
+        INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
+        L"/namazso/PawnIO.Setup/releases/latest/download/PawnIO_setup.exe",
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    BOOL bResults = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (bResults) {
+        bResults = WinHttpReceiveResponse(hRequest, nullptr);
+    }
+
+    if (!bResults) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    // 下载到临时文件
+    wchar_t tempPath[MAX_PATH], tempFile[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempPath);
+    GetTempFileNameW(tempPath, L"pio", 0, tempFile);
+    std::wstring exePath = std::wstring(tempFile) + L".exe";
+
+    HANDLE hFile = CreateFileW(exePath.c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        DeleteFileW(tempFile);
+        return false;
+    }
+
+    DWORD dwSize = 0;
+    DWORD written = 0;
+    do {
+        dwSize = 0;
+        WinHttpQueryDataAvailable(hRequest, &dwSize);
+        if (dwSize == 0) break;
+        std::vector<char> buffer(dwSize);
+        DWORD dwDownloaded = 0;
+        if (WinHttpReadData(hRequest, buffer.data(), dwSize, &dwDownloaded)) {
+            WriteFile(hFile, buffer.data(), dwDownloaded, &written, nullptr);
+        }
+    } while (dwSize > 0);
+
+    CloseHandle(hFile);
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    // 检查文件大小是否合理（安装器应 > 1MB）
+    LARGE_INTEGER fileSize;
+    HANDLE hCheck = CreateFileW(exePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                OPEN_EXISTING, 0, nullptr);
+    if (hCheck == INVALID_HANDLE_VALUE) {
+        DeleteFileW(exePath.c_str());
+        DeleteFileW(tempFile);
+        return false;
+    }
+    GetFileSizeEx(hCheck, &fileSize);
+    CloseHandle(hCheck);
+
+    if (fileSize.QuadPart < 1024 * 1024) {  // < 1MB，下载失败
+        DeleteFileW(exePath.c_str());
+        DeleteFileW(tempFile);
+        return false;
+    }
+
+    // 静默安装
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = L"open";
+    sei.lpFile = exePath.c_str();
+    sei.lpParameters = L"-install -silent";
+    sei.nShow = SW_HIDE;
+    ShellExecuteExW(&sei);
+
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, 30000);
+        CloseHandle(sei.hProcess);
+    }
+
+    DeleteFileW(exePath.c_str());
+    DeleteFileW(tempFile);
+
+    return IsDriverInstalled();
 }

@@ -4,6 +4,7 @@
 #include "SettingsDialog.h"
 #include "AppConfig.h"
 #include "OverlayWindow.h"
+#include "PawnIo.h"
 
 #include <d2d1_1.h>
 #include <dwrite.h>
@@ -37,8 +38,8 @@ static int KW = 440, KH = 460;  // 实际窗口尺寸（DPI 缩放后）
 static float g_dpiScale = 1.0f;
 static int CONTENT_Y = TITLE_H + TAB_H + 8;
 
-enum Tab { TAB_SHOW, TAB_LOOK, TAB_COLOR, TAB_TEMP, TAB_NET, TAB_N };
-static const wchar_t* kTabs[] = {L"显示", L"外观", L"颜色", L"温度", L"网络"};
+enum Tab { TAB_SHOW, TAB_LOOK, TAB_COLOR, TAB_TEMP, TAB_NET, TAB_DRIVER, TAB_N };
+static const wchar_t* kTabs[] = {L"显示", L"外观", L"颜色", L"温度", L"网络", L"驱动"};
 
 // ===================== 色板 =====================
 static const uint32_t kTxtColors[] = {
@@ -395,6 +396,49 @@ static void PageNet(float y) {
     for (int i = 0; i < 6; i++) Swatch(T::kPad+i*34.f, y, 26, kNetColors[i], kNetColors[i]==dc.netDownColor, 520+i);
 }
 
+// 驱动恢复状态文本（线程安全）
+static std::wstring g_driverMsg;
+static bool g_driverBusy = false;
+
+static void PageDriver(float y) {
+    Txt(L"PawnIO 驱动状态", T::kPad+4, y+6, T::kText);
+    bool installed = PawnIo::IsDriverInstalled();
+    // 状态指示点
+    uint32_t dotColor = installed ? 0xFF4ADE80 : 0xFFF87171;
+    RR(T::kPad+120, y+8, 10, 10, 5, dotColor);
+    Txt(installed ? L"已安装" : L"未安装", T::kPad+136, y+6,
+        installed ? 0xFF4ADE80 : 0xFFF87171, g_f11);
+    y += T::kRowH + 10;
+
+    // 说明
+    Txt(L"CPU 温度依赖 PawnIO 内核驱动，", T::kPad+4, y, T::kDim, g_f11); y += 18;
+    Txt(L"驱动可能被 Windows 安全更新清除。", T::kPad+4, y, T::kDim, g_f11);
+    y += T::kRowH + 6;
+
+    // 恢复按钮
+    bool enableBtns = !g_driverBusy;
+    // 重新安装（本地）
+    RR(T::kPad, y, BASE_W - 2*T::kPad, 36, 8,
+       enableBtns ? T::kCard : 0xFF1E1F35, T::kBorder);
+    Txt(L"重新安装（本地资源）", T::kPad+16, y+9,
+        enableBtns ? T::kText : T::kDim);
+    if (enableBtns) Zone2(700, T::kPad, y, BASE_W - 2*T::kPad, 36);
+    y += 44;
+
+    // 从网络下载并安装
+    RR(T::kPad, y, BASE_W - 2*T::kPad, 36, 8,
+       enableBtns ? T::kCard : 0xFF1E1F35, T::kBorder);
+    Txt(L"从网络下载并安装", T::kPad+16, y+9,
+        enableBtns ? T::kText : T::kDim);
+    if (enableBtns) Zone2(701, T::kPad, y, BASE_W - 2*T::kPad, 36);
+    y += 50;
+
+    // 状态消息
+    if (!g_driverMsg.empty()) {
+        Txt(g_driverMsg.c_str(), T::kPad+4, y, T::kDim, g_f11);
+    }
+}
+
 // ===================== 主渲染 =====================
 static void Render() {
     if (!g_rt) return;
@@ -436,6 +480,7 @@ static void Render() {
         case TAB_COLOR: PageColor(cy); break;
         case TAB_TEMP: PageTemp(cy); break;
         case TAB_NET: PageNet(cy); break;
+        case TAB_DRIVER: PageDriver(cy); break;
     }
 
     g_rt->EndDraw();
@@ -485,6 +530,31 @@ static void Click(int id) {
     if (id == 500) { dc.netColorSplit = !dc.netColorSplit; ch = true; }
     if (id >= 510 && id < 516) { dc.netUpColor = kNetColors[id-510]; ch = true; }
     if (id >= 520 && id < 526) { dc.netDownColor = kNetColors[id-520]; ch = true; }
+
+    // 驱动恢复（后台线程，避免卡 UI）
+    if ((id == 700 || id == 701) && !g_driverBusy) {
+        g_driverBusy = true;
+        g_driverMsg = id == 700 ? L"正在从本地资源恢复..." : L"正在从网络下载...";
+        InvalidateRect(g_hwnd, nullptr, FALSE);
+        bool useNetwork = (id == 701);
+        std::thread([useNetwork]() {
+            bool ok = useNetwork ? PawnIo::RecoverDriverNetwork()
+                                 : PawnIo::RecoverDriverEmbedded();
+            if (ok) {
+                PawnIo::Instance().Reinit();
+                g_driverMsg = PawnIo::Instance().IsAvailable()
+                    ? L"驱动已恢复，CPU 温度可正常读取"
+                    : L"驱动已安装，但初始化失败";
+            } else {
+                g_driverMsg = useNetwork
+                    ? L"网络下载失败，请检查网络后重试"
+                    : L"本地恢复失败，请尝试网络下载";
+            }
+            g_driverBusy = false;
+            if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+        }).detach();
+        return;
+    }
 
     if (ch) { AppConfig::Instance().Set(dc); Apply(); InvalidateRect(g_hwnd,nullptr,FALSE); }
 }

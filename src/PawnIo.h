@@ -10,13 +10,26 @@ public:
 
     // 初始化：打开设备 + 加载 RyzenSMU blob（从 EXE 资源）
     // 需要管理员权限，失败返回 false（静默降级）
+    // 如果驱动缺失，会自动尝试从内嵌资源恢复
     bool Init();
     void Shutdown();
     bool IsAvailable() const { return m_available; }
 
+    // 驱动健康检测：检查 PawnIO 内核驱动服务是否存在
+    static bool IsDriverInstalled();
+
+    // 从内嵌资源恢复驱动（静默安装），成功返回 true
+    static bool RecoverDriverEmbedded();
+
+    // 从网络下载并安装驱动，成功返回 true
+    static bool RecoverDriverNetwork();
+
     // 读取 CPU 温度（Tctl/Tdie，摄氏度）
     // 返回 -1 表示失败
     float ReadCpuTemperature();
+
+    // 重新初始化驱动（关闭后重开，用于手动恢复后重连）
+    bool Reinit();
 
 private:
     PawnIo();
@@ -28,7 +41,6 @@ private:
     bool ResolvePmTable();
     bool UpdateAndReadPmTable();
     void DetectTempOffset();
-    bool Reinit();  // 关闭并重新初始化驱动（SMU 通信中断后自动恢复）
 
     // PawnIO API 函数指针
     using pawnio_open_t    = HRESULT (STDAPICALLTYPE*)(PHANDLE);
