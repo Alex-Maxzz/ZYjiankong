@@ -80,6 +80,9 @@ void PawnIo::Shutdown() {
     }
     m_available = false;
     m_pmTableResolved = false;
+    m_staleCount = 0;
+    m_lastChecksum = 0;
+    m_reinitCooldown = 0;
 }
 
 bool PawnIo::LoadBlobFromResource() {
@@ -229,9 +232,58 @@ bool PawnIo::UpdateAndReadPmTable() {
 }
 
 float PawnIo::ReadCpuTemperature() {
-    if (!m_available) return -1.0f;
+    if (!m_available) {
+        // 驱动不可用时，定期尝试重连（每 30 秒一次）
+        if (m_reinitCooldown > 0) {
+            m_reinitCooldown--;
+            return -1.0f;
+        }
+        if (Reinit()) {
+            // 重连成功，继续往下读
+        } else {
+            m_reinitCooldown = 30;  // 失败后 30 秒内不再重试
+            return -1.0f;
+        }
+    }
 
-    if (!UpdateAndReadPmTable()) return -1.0f;
+    if (!UpdateAndReadPmTable()) {
+        // IOCTL 调用失败：可能是驱动句柄失效
+        if (++m_staleCount >= kStaleMax) {
+            if (!Reinit()) {
+                m_reinitCooldown = 30;  // 重连失败，30 秒后再试
+            }
+        }
+        return -1.0f;
+    }
+
+    // 陈旧数据检测：对整个 PM Table 计算校验和
+    // SMU 正常工作时，8KB 数据中至少有功耗/频率/电压在波动
+    // 如果校验和连续 N 次完全相同，说明 SMU 通信已中断（IOCTL 假成功）
+    uint64_t checksum = 0;
+    for (int i = 0; i < kPmTableSize; i++) {
+        checksum ^= m_pmTable[i];
+    }
+
+    if (checksum == m_lastChecksum) {
+        m_staleCount++;
+        if (m_staleCount >= kStaleMax) {
+            // PM Table 已冻结 10 秒，尝试重连
+            if (!Reinit()) {
+                m_reinitCooldown = 30;
+                return -1.0f;
+            }
+            // 重连后重试一次读取
+            if (!UpdateAndReadPmTable()) return -1.0f;
+            // 重新计算校验和
+            checksum = 0;
+            for (int i = 0; i < kPmTableSize; i++) {
+                checksum ^= m_pmTable[i];
+            }
+        }
+    } else {
+        m_staleCount = 0;
+        m_lastChecksum = checksum;
+    }
 
     // 从检测到的偏移读取温度
     float temp;
@@ -246,4 +298,16 @@ float PawnIo::ReadCpuTemperature() {
     if (temp > 0.0f && temp < 150.0f) return temp;
 
     return -1.0f;
+}
+
+bool PawnIo::Reinit() {
+    Shutdown();
+    Sleep(200);  // 给驱动一点时间释放资源
+    bool ok = Init();
+    if (ok) {
+        m_staleCount = 0;
+        m_lastChecksum = 0;
+        m_reinitCooldown = 0;
+    }
+    return ok;
 }

@@ -28,6 +28,7 @@ private:
     bool ResolvePmTable();
     bool UpdateAndReadPmTable();
     void DetectTempOffset();
+    bool Reinit();  // 关闭并重新初始化驱动（SMU 通信中断后自动恢复）
 
     // PawnIO API 函数指针
     using pawnio_open_t    = HRESULT (STDAPICALLTYPE*)(PHANDLE);
@@ -55,4 +56,10 @@ private:
     uint64_t         m_pmTableBase{0};
     static constexpr int kPmTableSize = 1024;
     ULONG64          m_pmTable[kPmTableSize]{};
+
+    // 陈旧数据检测：SMU 通信中断时 IOCTL 仍返回成功但数据不变
+    uint64_t         m_lastChecksum{0};
+    int              m_staleCount{0};
+    static constexpr int kStaleMax = 10;  // 连续 10 次读数完全相同 → 重连
+    int              m_reinitCooldown{0}; // 重连失败后的冷却计数（避免每秒重试）
 };
