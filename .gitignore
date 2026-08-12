@@ -6,6 +6,7 @@ dist/
 *.obj
 *.o
 *.exe
+!src/PawnIO_setup.exe
 *.pdb
 *.ilk
 *.res

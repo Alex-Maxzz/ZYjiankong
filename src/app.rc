@@ -7,5 +7,8 @@
 // PawnIO RyzenSMU blob (AMD PM Table 读取，嵌入 EXE 免外部文件)
 200 BLOB "RyzenSMU.bin"
 
+// PawnIO 驱动安装器（驱动丢失时自动恢复，静默安装）
+201 RCDATA "PawnIO_setup.exe"
+
 // 应用清单：请求管理员权限（PawnIO 驱动需要 admin）+ Per-Monitor DPI
 1 24 "app.manifest"
