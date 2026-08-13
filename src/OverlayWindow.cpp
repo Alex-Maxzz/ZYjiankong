@@ -1038,31 +1038,27 @@ void OverlayWindow::CleanMemory() {
 
         CleanLog(L"NtSetSystemInformation ptr=%p, class=0x%X", NtSetSysInfo, kSystemMemoryListInformation);
 
-        // 1. 清空所有进程工作集
-        {
-            ULONG cmd = kMemEmptyWorkingSets;
-            LONG status = NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
-            CleanLog(L"  [1] EmptyWorkingSets(5) sizeof=%zu → 0x%08X (%s)",
-                     sizeof(cmd), (unsigned)status, NtStatusName(status));
-        }
+        // 辅助宏：执行一条命令并记录内存变化
+        #define CLEAN_STEP(num, name, cmd_val) do { \
+            float _before = GetAvailableMemoryGB(); \
+            ULONG cmd = (cmd_val); \
+            LONG status = NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd)); \
+            float _after = GetAvailableMemoryGB(); \
+            CleanLog(L"  [%d] %s(%d) → 0x%08X (%s)  mem: %.3f→%.3f (+%.3fG)", \
+                     (num), L##name, (int)(cmd_val), (unsigned)status, NtStatusName(status), \
+                     _before, _after, _after - _before); \
+        } while(0)
 
-        // 2. 清空备用列表（核心释放步骤）
-        {
-            ULONG cmd = kMemPurgeStandbyList;
-            LONG status = NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
-            CleanLog(L"  [2] PurgeStandbyList(1) sizeof=%zu → 0x%08X (%s)",
-                     sizeof(cmd), (unsigned)status, NtStatusName(status));
-        }
+        // 5 步顺序：先写回脏页 → 清现有备用 → 裁剪工作集 → 再清备用 → 清低优先级
+        CLEAN_STEP(1, "FlushModifiedList",       kMemFlushModifiedList);           // 6: 脏页写回磁盘
+        CLEAN_STEP(2, "PurgeStandbyList",        kMemPurgeStandbyList);            // 1: 清现有备用列表
+        CLEAN_STEP(3, "EmptyWorkingSets",        kMemEmptyWorkingSets);            // 5: 裁剪所有进程工作集
+        CLEAN_STEP(4, "PurgeStandbyList",        kMemPurgeStandbyList);            // 1: 再清（步骤3产生的新备用页面）
+        CLEAN_STEP(5, "PurgeLowPriorityStandby", kMemPurgeLowPriorityStandbyList); // 0: 清低优先级备用
 
-        // 3. 清空低优先级备用列表
-        {
-            ULONG cmd = kMemPurgeLowPriorityStandbyList;
-            LONG status = NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
-            CleanLog(L"  [3] PurgeLowPriorityStandbyList(0) sizeof=%zu → 0x%08X (%s)",
-                     sizeof(cmd), (unsigned)status, NtStatusName(status));
-        }
+        #undef CLEAN_STEP
 
-        Sleep(200);  // 等待系统回收页面
+        Sleep(300);  // 等待系统回收页面
     }).detach();
 }
 
