@@ -77,6 +77,7 @@ bool OverlayWindow::Create(const OverlayConfig& config) {
     BringToTop();   // 启动后立即置顶（防止被先启动的 TranslucentTB 遮挡）
 
     m_inited = true;
+    Render();       // 立即渲染一次，避免启动后 1 秒内空白
     return true;
 }
 
@@ -898,6 +899,36 @@ LRESULT OverlayWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 typedef LONG(NTAPI* pNtSetSystemInformation)(INT, PVOID, ULONG);
 static constexpr INT  kSystemMemoryListInformation = 0x50;
 
+// SYSTEM_MEMORY_LIST_COMMAND 枚举（来自 NT 内核，4 字节 ULONG）
+// 参考：ntddk.h / Mem Reduct / System Informer
+enum SystemMemoryListCommand : ULONG {
+    kMemPurgeLowPriorityStandbyList = 0,  // 清低优先级备用列表
+    kMemPurgeStandbyList            = 1,  // 清备用列表（核心释放步骤）
+    kMemPurgeModifiedList           = 2,
+    kMemPurgeNoPses                 = 3,
+    kMemPurgeProcessEnum            = 4,  // 枚举进程（非清理命令）
+    kMemEmptyWorkingSets            = 5,  // 清空所有进程工作集
+    kMemFlushModifiedList           = 6,
+    kMemPurgeTransitionList         = 7,
+};
+
+// 启用 SeProfSingleProcessPrivilege（管理员令牌中有但默认未启用）
+static bool EnableProfilePrivilege() {
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+        return false;
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    LookupPrivilegeValueW(nullptr, L"SeProfSingleProcessPrivilege",
+                          &tp.Privileges[0].Luid);
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    AdjustTokenPrivileges(hToken, FALSE, &tp, 0, nullptr, nullptr);
+    bool ok = (GetLastError() == ERROR_SUCCESS);
+    CloseHandle(hToken);
+    return ok;
+}
+
 float OverlayWindow::GetAvailableMemoryGB() {
     MEMORYSTATUSEX memInfo{};
     memInfo.dwLength = sizeof(memInfo);
@@ -915,46 +946,64 @@ void OverlayWindow::CleanMemory() {
     m_cleaning = true;
     m_cleanPhase = CleanPhase::Cleaning;
     m_cleanTick = 0;
-    // 启动 60fps 动画定时器
     SetTimer(m_hwnd, kTimerCleanAnim, 16, nullptr);
 
     float beforeGB = GetAvailableMemoryGB();
 
     // 后台线程执行系统级内存清理
     std::thread([this, beforeGB]() {
+        // RAII 保底：无论线程是否异常，都确保 m_cleaning 被复位
+        struct CleanGuard {
+            OverlayWindow* self;
+            float beforeGB;
+            ~CleanGuard() {
+                float afterGB = self->GetAvailableMemoryGB();
+                float freed = afterGB - beforeGB;
+                if (freed < 0) freed = 0;
+                self->m_cleanFreedGB = freed;
+                self->m_cleaning = false;
+            }
+        } guard{this, beforeGB};
+
+        // 关键：启用 SeProfSingleProcessPrivilege，否则 NtSetSystemInformation 返回 STATUS_PRIVILEGE_NOT_HELD
+        EnableProfilePrivilege();
+
         HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
         if (hNtdll) {
             auto NtSetSysInfo = reinterpret_cast<pNtSetSystemInformation>(
                 GetProcAddress(hNtdll, "NtSetSystemInformation"));
             if (NtSetSysInfo) {
-                // 1. 清空所有进程工作集（系统级一次调用，替代逐进程 EmptyWorkingSet）
-                INT cmd = 2;  // MemoryEmptyWorkingSets
+                // 1. 清空所有进程工作集（系统级一次调用）
+                ULONG cmd = kMemEmptyWorkingSets;
                 NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
 
-                // 2. 清空备用列表（释放大量缓存内存，核心步骤）
-                cmd = 4;  // MemoryPurgeStandbyList
+                // 2. 清空备用列表（核心释放步骤，释放大量缓存内存）
+                cmd = kMemPurgeStandbyList;
                 NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
 
                 // 3. 清空低优先级备用列表
-                cmd = 0;  // MemoryPurgeLowPriorityStandbyList
+                cmd = kMemPurgeLowPriorityStandbyList;
                 NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
             }
         }
 
         Sleep(200);  // 等待系统回收页面
-
-        float afterGB = GetAvailableMemoryGB();
-        float freed = afterGB - beforeGB;
-        if (freed < 0) freed = 0;
-
-        m_cleanFreedGB = freed;
-        m_cleaning = false;
-        // 定时器检测到 m_cleaning=false 后自动切换到 SlideIn 阶段
+        // guard 析构时自动计算 freed 并设置 m_cleaning = false
     }).detach();
 }
 
 void OverlayWindow::AdvanceCleanAnim() {
     m_cleanTick++;
+
+    // 安全超时：动画总时长超过 8 秒（480帧@60fps），强制复位到 Idle
+    if (m_cleanTick > 480 && m_cleanPhase != CleanPhase::Idle) {
+        m_cleanPhase   = CleanPhase::Idle;
+        m_cleanAlpha    = 1.0f;
+        m_cleanOffsetX  = 0;
+        m_cleanCooldown = 5;
+        KillTimer(m_hwnd, kTimerCleanAnim);
+        return;
+    }
 
     switch (m_cleanPhase) {
         case CleanPhase::Cleaning:
