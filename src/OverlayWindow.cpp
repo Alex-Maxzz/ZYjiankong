@@ -18,6 +18,9 @@
 static const wchar_t* kOverlayClassName = L"TaskbarStudioOverlay";
 static const wchar_t* kOverlayTitle     = L"TaskbarStudio";
 
+// 内存清理按钮动画定时器 ID
+static constexpr UINT_PTR kTimerCleanAnim = 100;
+
 // ============================================================
 //  构造/析构
 // ============================================================
@@ -625,19 +628,35 @@ void OverlayWindow::DrawMetrics(ID2D1DeviceContext* ctx, const SystemMetrics& me
     // === 内存清理按钮 ===
     if (m_config.showCleanBtn) {
         drawSep();
-        // 决定显示内容：清理后短暂显示释放量，否则显示可用内存
         std::wstring cleanTxt;
         ID2D1Brush* cleanBrush;
-        if (m_cleanShowFrames > 0) {
-            // 显示释放量
+        float renderOffsetX = 0;
+        float renderAlpha = 1.0f;
+
+        if (m_cleanPhase == CleanPhase::Cleaning) {
+            // 等待后台线程：脉冲 "..."
+            cleanTxt = L"...";
+            cleanBrush = m_brushAccent ? m_brushAccent : m_brushText;
+            renderAlpha = 0.4f + 0.6f * (0.5f + 0.5f *
+                sinf(static_cast<float>(m_cleanTick) * 0.15f));
+        } else if (m_cleanPhase == CleanPhase::SlideIn ||
+                   m_cleanPhase == CleanPhase::Hold    ||
+                   m_cleanPhase == CleanPhase::SlideOut) {
+            // 显示释放量，带偏移和透明度
             wchar_t buf[16];
             swprintf_s(buf, L"+%.1fG", m_cleanFreedGB);
             cleanTxt = buf;
-            cleanBrush = m_brushNetDown;  // 青色（正向反馈）
-            if (!cleanBrush) cleanBrush = m_brushText;
-        } else if (m_cleaning) {
-            cleanTxt = L"...";
-            cleanBrush = m_brushAccent ? m_brushAccent : m_brushText;
+            cleanBrush = m_brushNetDown ? m_brushNetDown : m_brushText;
+            renderOffsetX = m_cleanOffsetX;
+            renderAlpha = m_cleanAlpha;
+        } else if (m_cleanPhase == CleanPhase::FadeIn) {
+            // 新可用内存淡入
+            float avail = GetAvailableMemoryGB();
+            wchar_t buf[16];
+            swprintf_s(buf, L"%.1fG", avail);
+            cleanTxt = buf;
+            cleanBrush = m_brushText;
+            renderAlpha = m_cleanAlpha;
         } else if (m_cleanCooldown > 0) {
             // 冷却中：暗色
             float avail = GetAvailableMemoryGB();
@@ -651,20 +670,32 @@ void OverlayWindow::DrawMetrics(ID2D1DeviceContext* ctx, const SystemMetrics& me
             wchar_t buf[16];
             swprintf_s(buf, L"%.1fG", avail);
             cleanTxt = buf;
-            // 悬停时用 accent 色，否则用文字色
             cleanBrush = (m_cleanHover && m_brushAccent) ? m_brushAccent : m_brushText;
         }
-        // 记录按钮区域（物理像素，供 WM_NCHITTEST 用）
+
+        // 记录按钮区域（用原始 x 位置，不含动画偏移）
         float charW = fontSizePx * 0.62f;
         float btnW = cleanTxt.size() * charW + padX * 0.6f;
         m_cleanBtnRect.left = static_cast<LONG>(x);
         m_cleanBtnRect.top = static_cast<LONG>(y - 2);
         m_cleanBtnRect.right = static_cast<LONG>(x + btnW);
         m_cleanBtnRect.bottom = static_cast<LONG>(y + fontSizePx + 2);
-        DrawTextLeft(ctx, cleanTxt, cleanBrush, m_monoFormat, fontSizePx, 0, x, y);
+
+        // 应用透明度（临时修改 brush opacity，画完恢复）
+        float drawX = x + renderOffsetX;
+        if (cleanBrush && renderAlpha < 1.0f) {
+            float origAlpha = cleanBrush->GetOpacity();
+            cleanBrush->SetOpacity(origAlpha * renderAlpha);
+            DrawTextLeft(ctx, cleanTxt, cleanBrush, m_monoFormat,
+                         fontSizePx, 0, drawX, y);
+            cleanBrush->SetOpacity(origAlpha);
+        } else {
+            DrawTextLeft(ctx, cleanTxt, cleanBrush, m_monoFormat,
+                         fontSizePx, 0, drawX, y);
+        }
+        x = drawX;
         prevGroupDrawn = true;
     } else {
-        // 按钮关闭时清零 rect，不拦截鼠标
         m_cleanBtnRect = {0, 0, 0, 0};
     }
 }
@@ -838,12 +869,19 @@ LRESULT OverlayWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             if (pt.x >= m_cleanBtnRect.left && pt.x <= m_cleanBtnRect.right &&
                 pt.y >= m_cleanBtnRect.top && pt.y <= m_cleanBtnRect.bottom) {
-                if (m_cleanCooldown == 0 && !m_cleaning) {
+                if (m_cleanCooldown == 0 && !m_cleaning &&
+                m_cleanPhase == CleanPhase::Idle) {
                     CleanMemory();
                 }
             }
             return 0;
         }
+        case WM_TIMER:
+            if (wp == kTimerCleanAnim) {
+                AdvanceCleanAnim();
+                Render();
+            }
+            return 0;
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
@@ -856,6 +894,10 @@ LRESULT OverlayWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 //  内存清理按钮
 // ============================================================
 
+// NtSetSystemInformation 类型与常量
+typedef LONG(NTAPI* pNtSetSystemInformation)(INT, PVOID, ULONG);
+static constexpr INT  kSystemMemoryListInformation = 0x50;
+
 float OverlayWindow::GetAvailableMemoryGB() {
     MEMORYSTATUSEX memInfo{};
     memInfo.dwLength = sizeof(memInfo);
@@ -867,50 +909,124 @@ float OverlayWindow::GetAvailableMemoryGB() {
 }
 
 void OverlayWindow::CleanMemory() {
-    if (m_cleaning || m_cleanCooldown > 0) return;
+    if (m_cleaning || m_cleanCooldown > 0 ||
+        m_cleanPhase != CleanPhase::Idle) return;
 
     m_cleaning = true;
+    m_cleanPhase = CleanPhase::Cleaning;
+    m_cleanTick = 0;
+    // 启动 60fps 动画定时器
+    SetTimer(m_hwnd, kTimerCleanAnim, 16, nullptr);
+
     float beforeGB = GetAvailableMemoryGB();
 
-    // 后台线程执行清理，避免阻塞 UI 渲染
+    // 后台线程执行系统级内存清理
     std::thread([this, beforeGB]() {
-        // 枚举所有进程，裁剪每个进程的工作集（Working Set）
-        // 这会将进程的内存页面从物理内存换出到页面文件，释放物理内存
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snap != INVALID_HANDLE_VALUE) {
-            PROCESSENTRY32W pe{};
-            pe.dwSize = sizeof(pe);
-            if (Process32FirstW(snap, &pe)) {
-                do {
-                    HANDLE hProc = OpenProcess(
-                        PROCESS_SET_QUOTA, FALSE, pe.th32ProcessID);
-                    if (hProc) {
-                        EmptyWorkingSet(hProc);
-                        CloseHandle(hProc);
-                    }
-                } while (Process32NextW(snap, &pe));
+        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+        if (hNtdll) {
+            auto NtSetSysInfo = reinterpret_cast<pNtSetSystemInformation>(
+                GetProcAddress(hNtdll, "NtSetSystemInformation"));
+            if (NtSetSysInfo) {
+                // 1. 清空所有进程工作集（系统级一次调用，替代逐进程 EmptyWorkingSet）
+                INT cmd = 2;  // MemoryEmptyWorkingSets
+                NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
+
+                // 2. 清空备用列表（释放大量缓存内存，核心步骤）
+                cmd = 4;  // MemoryPurgeStandbyList
+                NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
+
+                // 3. 清空低优先级备用列表
+                cmd = 0;  // MemoryPurgeLowPriorityStandbyList
+                NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
             }
-            CloseHandle(snap);
         }
 
-        // 也裁剪当前进程的工作集
-        EmptyWorkingSet(GetCurrentProcess());
-
-        // 短暂等待让系统回收页面
-        Sleep(200);
+        Sleep(200);  // 等待系统回收页面
 
         float afterGB = GetAvailableMemoryGB();
         float freed = afterGB - beforeGB;
         if (freed < 0) freed = 0;
 
         m_cleanFreedGB = freed;
-        m_cleanShowFrames = 2;   // 显示释放量 2 秒
-        m_cleanCooldown = 5;     // 5 秒冷却
         m_cleaning = false;
+        // 定时器检测到 m_cleaning=false 后自动切换到 SlideIn 阶段
     }).detach();
+}
+
+void OverlayWindow::AdvanceCleanAnim() {
+    m_cleanTick++;
+
+    switch (m_cleanPhase) {
+        case CleanPhase::Cleaning:
+            // 等待后台线程完成，显示 "..." 脉冲
+            if (!m_cleaning) {
+                m_cleanPhase   = CleanPhase::SlideIn;
+                m_cleanFrame    = 0;
+                m_cleanTotalFrames = 21;   // 350ms @ 60fps
+                m_cleanOffsetX  = 24.0f;
+                m_cleanAlpha    = 0.0f;
+            }
+            break;
+
+        case CleanPhase::SlideIn: {
+            m_cleanFrame++;
+            float t = static_cast<float>(m_cleanFrame) / m_cleanTotalFrames;
+            float eased = 1.0f - powf(1.0f - t, 3.0f);  // easeOutCubic
+            m_cleanOffsetX = 24.0f * (1.0f - eased);
+            m_cleanAlpha   = eased;
+            if (m_cleanFrame >= m_cleanTotalFrames) {
+                m_cleanPhase   = CleanPhase::Hold;
+                m_cleanFrame    = 0;
+                m_cleanTotalFrames = 120;  // 2s
+                m_cleanOffsetX  = 0;
+                m_cleanAlpha    = 1.0f;
+            }
+            break;
+        }
+
+        case CleanPhase::Hold:
+            m_cleanFrame++;
+            if (m_cleanFrame >= m_cleanTotalFrames) {
+                m_cleanPhase   = CleanPhase::SlideOut;
+                m_cleanFrame    = 0;
+                m_cleanTotalFrames = 18;   // 300ms
+            }
+            break;
+
+        case CleanPhase::SlideOut: {
+            m_cleanFrame++;
+            float t = static_cast<float>(m_cleanFrame) / m_cleanTotalFrames;
+            m_cleanOffsetX = -24.0f * t;
+            m_cleanAlpha   = 1.0f - t;
+            if (m_cleanFrame >= m_cleanTotalFrames) {
+                m_cleanPhase   = CleanPhase::FadeIn;
+                m_cleanFrame    = 0;
+                m_cleanTotalFrames = 15;   // 250ms
+                m_cleanOffsetX  = 0;
+                m_cleanAlpha    = 0.0f;
+            }
+            break;
+        }
+
+        case CleanPhase::FadeIn: {
+            m_cleanFrame++;
+            float t = static_cast<float>(m_cleanFrame) / m_cleanTotalFrames;
+            m_cleanAlpha = t;
+            if (m_cleanFrame >= m_cleanTotalFrames) {
+                m_cleanPhase   = CleanPhase::Idle;
+                m_cleanAlpha    = 1.0f;
+                m_cleanCooldown = 5;       // 5 秒冷却
+                KillTimer(m_hwnd, kTimerCleanAnim);
+            }
+            break;
+        }
+
+        case CleanPhase::Idle:
+            KillTimer(m_hwnd, kTimerCleanAnim);
+            break;
+    }
 }
 
 void OverlayWindow::TickClean() {
     if (m_cleanCooldown > 0) m_cleanCooldown--;
-    if (m_cleanShowFrames > 0) m_cleanShowFrames--;
 }
