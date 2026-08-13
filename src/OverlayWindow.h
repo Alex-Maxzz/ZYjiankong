@@ -113,7 +113,8 @@ private:
     // 内存清理按钮
     void CleanMemory();
     static float GetAvailableMemoryGB();
-    void TickClean();  // 每秒调用：倒计时冷却和结果显示
+    void TickClean();           // 每秒调用：倒计时冷却
+    void AdvanceCleanAnim();    // 动画帧推进（60fps 定时器驱动）
 
     HWND                    m_hwnd{nullptr};
     OverlayConfig           m_config{};
@@ -157,8 +158,16 @@ private:
     // 内存清理按钮状态
     RECT     m_cleanBtnRect{0,0,0,0};  // 物理像素，WM_NCHITTEST 用
     int      m_cleanCooldown{0};       // 冷却倒计时（秒）
-    int      m_cleanShowFrames{0};     // 显示释放量的帧数（秒）
     float    m_cleanFreedGB{0};        // 最近一次释放的内存（GB）
     bool     m_cleanHover{false};      // 鼠标悬停
-    bool     m_cleaning{false};        // 正在清理中（后台线程）
+    bool     m_cleaning{false};        // 后台线程正在清理
+
+    // D 滑入淡出动画状态机
+    enum class CleanPhase { Idle, Cleaning, SlideIn, Hold, SlideOut, FadeIn };
+    CleanPhase m_cleanPhase{CleanPhase::Idle};
+    int   m_cleanFrame{0};         // 当前阶段已过帧数
+    int   m_cleanTotalFrames{0};   // 当前阶段总帧数
+    float m_cleanOffsetX{0};       // 渲染 X 偏移（物理像素）
+    float m_cleanAlpha{1.0f};      // 透明度 0-1
+    int   m_cleanTick{0};          // 全局帧计数（用于 "..." 脉冲）
 };
