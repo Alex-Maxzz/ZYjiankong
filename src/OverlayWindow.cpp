@@ -912,62 +912,16 @@ enum SystemMemoryListCommand : ULONG {
     kMemPurgeTransitionList         = 7,
 };
 
-// 诊断日志：写入 EXE 同目录下 clean_log.txt
-static void CleanLog(const wchar_t* fmt, ...) {
-    wchar_t buf[512];
-    va_list args;
-    va_start(args, fmt);
-    _vsnwprintf_s(buf, _countof(buf), _TRUNCATE, fmt, args);
-    va_end(args);
-
-    // 加时间戳
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    wchar_t line[600];
-    _snwprintf_s(line, _countof(line), _TRUNCATE, L"[%02d:%02d:%02d.%03d] %s\r\n",
-                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
-
-    // 写入文件（追加模式）
-    wchar_t path[MAX_PATH];
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    PathRemoveFileSpecW(path);
-    wcscat_s(path, MAX_PATH, L"\\clean_log.txt");
-
-    HANDLE hFile = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ,
-                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile != INVALID_HANDLE_VALUE) {
-        DWORD written;
-        WriteFile(hFile, line, (DWORD)(wcslen(line) * sizeof(wchar_t)), &written, nullptr);
-        CloseHandle(hFile);
-    }
-    OutputDebugStringW(line);
-}
-
-// NTSTATUS 转可读字符串
-static const wchar_t* NtStatusName(LONG status) {
-    if (status == 0)                return L"SUCCESS";
-    if (status == (LONG)0xC0000004) return L"INFO_LENGTH_MISMATCH";
-    if (status == (LONG)0xC000000D) return L"INVALID_PARAMETER";
-    if (status == (LONG)0xC0000061) return L"PRIVILEGE_NOT_HELD";
-    if (status == (LONG)0xC0000022) return L"ACCESS_DENIED";
-    return L"UNKNOWN";
-}
-
-// 启用 SeProfileSingleProcessPrivilege（注意：完整拼写是 Profile 不是 Prof）
+// 启用 SeProfileSingleProcessPrivilege（管理员令牌中有但默认未启用）
 static bool EnableProfilePrivilege() {
     HANDLE hToken = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(),
-            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
-        CleanLog(L"EnablePrivilege: OpenProcessToken FAILED err=%lu", GetLastError());
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
         return false;
-    }
     TOKEN_PRIVILEGES tp{};
     tp.PrivilegeCount = 1;
-    BOOL found = LookupPrivilegeValueW(nullptr, L"SeProfileSingleProcessPrivilege",
-                                       &tp.Privileges[0].Luid);
-    if (!found) {
-        CleanLog(L"EnablePrivilege: LookupPrivilegeValue FAILED err=%lu (privilege not found)",
-                 GetLastError());
+    if (!LookupPrivilegeValueW(nullptr, L"SeProfileSingleProcessPrivilege",
+                               &tp.Privileges[0].Luid)) {
         CloseHandle(hToken);
         return false;
     }
@@ -976,9 +930,6 @@ static bool EnableProfilePrivilege() {
     BOOL ok = AdjustTokenPrivileges(hToken, FALSE, &tp, 0, nullptr, nullptr);
     DWORD err = GetLastError();
     CloseHandle(hToken);
-    CleanLog(L"EnablePrivilege: AdjustToken=%d err=%lu (%s)",
-             ok, err, err == ERROR_SUCCESS ? L"OK" :
-             err == ERROR_NOT_ALL_ASSIGNED ? L"NOT_ALL_ASSIGNED" : L"OTHER");
     return ok && err == ERROR_SUCCESS;
 }
 
@@ -1002,7 +953,6 @@ void OverlayWindow::CleanMemory() {
     SetTimer(m_hwnd, kTimerCleanAnim, 16, nullptr);
 
     float beforeGB = GetAvailableMemoryGB();
-    CleanLog(L"=== CleanMemory START === before=%.3fG", beforeGB);
 
     // 后台线程执行系统级内存清理
     std::thread([this, beforeGB]() {
@@ -1016,47 +966,38 @@ void OverlayWindow::CleanMemory() {
                 if (freed < 0) freed = 0;
                 self->m_cleanFreedGB = freed;
                 self->m_cleaning = false;
-                CleanLog(L"=== CleanMemory END === after=%.3fG freed=%.3fG", afterGB, freed);
             }
         } guard{this, beforeGB};
 
-        // 启用特权（Mem Reduct 不需要这步，但有些系统可能需要）
+        // 启用 SeProfileSingleProcessPrivilege
         EnableProfilePrivilege();
 
         HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
-        if (!hNtdll) {
-            CleanLog(L"ERROR: ntdll.dll not loaded");
-            return;
-        }
+        if (!hNtdll) return;
 
         auto NtSetSysInfo = reinterpret_cast<pNtSetSystemInformation>(
             GetProcAddress(hNtdll, "NtSetSystemInformation"));
-        if (!NtSetSysInfo) {
-            CleanLog(L"ERROR: NtSetSystemInformation not found in ntdll");
-            return;
-        }
+        if (!NtSetSysInfo) return;
 
-        CleanLog(L"NtSetSystemInformation ptr=%p, class=0x%X", NtSetSysInfo, kSystemMemoryListInformation);
+        // 5 步顺序清理（参考 Mem Reduct 策略）：
+        // ① 脏页写回磁盘 → ② 清现有备用列表 → ③ 裁剪所有进程工作集
+        // → ④ 再清备用（③ 产生的新备用页面）→ ⑤ 清低优先级备用
+        ULONG cmd;
 
-        // 辅助宏：执行一条命令并记录内存变化
-        #define CLEAN_STEP(num, name, cmd_val) do { \
-            float _before = GetAvailableMemoryGB(); \
-            ULONG cmd = (cmd_val); \
-            LONG status = NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd)); \
-            float _after = GetAvailableMemoryGB(); \
-            CleanLog(L"  [%d] %s(%d) → 0x%08X (%s)  mem: %.3f→%.3f (+%.3fG)", \
-                     (num), L##name, (int)(cmd_val), (unsigned)status, NtStatusName(status), \
-                     _before, _after, _after - _before); \
-        } while(0)
+        cmd = kMemFlushModifiedList;            // 6: 脏页写回磁盘
+        NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
 
-        // 5 步顺序：先写回脏页 → 清现有备用 → 裁剪工作集 → 再清备用 → 清低优先级
-        CLEAN_STEP(1, "FlushModifiedList",       kMemFlushModifiedList);           // 6: 脏页写回磁盘
-        CLEAN_STEP(2, "PurgeStandbyList",        kMemPurgeStandbyList);            // 1: 清现有备用列表
-        CLEAN_STEP(3, "EmptyWorkingSets",        kMemEmptyWorkingSets);            // 5: 裁剪所有进程工作集
-        CLEAN_STEP(4, "PurgeStandbyList",        kMemPurgeStandbyList);            // 1: 再清（步骤3产生的新备用页面）
-        CLEAN_STEP(5, "PurgeLowPriorityStandby", kMemPurgeLowPriorityStandbyList); // 0: 清低优先级备用
+        cmd = kMemPurgeStandbyList;             // 1: 清现有备用列表
+        NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
 
-        #undef CLEAN_STEP
+        cmd = kMemEmptyWorkingSets;             // 5: 裁剪所有进程工作集
+        NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
+
+        cmd = kMemPurgeStandbyList;             // 1: 再清（步骤③产生的新备用页面）
+        NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
+
+        cmd = kMemPurgeLowPriorityStandbyList;  // 0: 清低优先级备用
+        NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
 
         Sleep(300);  // 等待系统回收页面
     }).detach();
