@@ -49,10 +49,11 @@ bool OverlayWindow::Create(const OverlayConfig& config) {
     RegisterClassExW(&wc);
 
     // WS_EX_NOREDIRECTIONBITMAP: 透明窗口，必须配合 DirectComposition
-    // WS_EX_TRANSPARENT: 鼠标穿透
+    // WS_EX_NOACTIVATE: 点击不抢焦点（关键：去掉 TRANSPARENT 后仍不干扰任务栏）
     // WS_EX_TOOLWINDOW: 不在任务栏/Alt+Tab 显示
     // WS_EX_TOPMOST: 置顶
-    DWORD exStyle = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT |
+    // 注意：不再用 WS_EX_TRANSPARENT 全穿透，改为 WM_NCHITTEST 区域级穿透
+    DWORD exStyle = WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE |
                     WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
     DWORD style   = WS_POPUP;
 
@@ -335,6 +336,13 @@ void OverlayWindow::UpdatePosition() {
         contentW += (groups - 1) * sepGap;
     }
 
+    // 内存清理按钮宽度（可用内存 + 分隔符）
+    if (m_config.showCleanBtn) {
+        if (groups > 0) contentW += sepGap;
+        contentW += 5 * charWidth + padX * 0.6f;  // "8.2G" + padding
+        groups++;
+    }
+
     int width = static_cast<int>(contentW + padX * 2);
     if (width < 20) width = 20;
     int height = m_taskbarHeight;
@@ -364,6 +372,7 @@ void OverlayWindow::OnDpiChanged() {
 void OverlayWindow::Update() {
     if (!m_inited) return;
     if (!m_visible) return;  // 隐藏时跳过渲染
+    TickClean();  // 内存清理按钮：倒计时冷却和结果显示
     Render();
 }
 
@@ -612,6 +621,52 @@ void OverlayWindow::DrawMetrics(ID2D1DeviceContext* ctx, const SystemMetrics& me
         x += itemGap;
         prevGroupDrawn = true;
     }
+
+    // === 内存清理按钮 ===
+    if (m_config.showCleanBtn) {
+        drawSep();
+        // 决定显示内容：清理后短暂显示释放量，否则显示可用内存
+        std::wstring cleanTxt;
+        ID2D1Brush* cleanBrush;
+        if (m_cleanShowFrames > 0) {
+            // 显示释放量
+            wchar_t buf[16];
+            swprintf_s(buf, L"+%.1fG", m_cleanFreedGB);
+            cleanTxt = buf;
+            cleanBrush = m_brushNetDown;  // 青色（正向反馈）
+            if (!cleanBrush) cleanBrush = m_brushText;
+        } else if (m_cleaning) {
+            cleanTxt = L"...";
+            cleanBrush = m_brushAccent ? m_brushAccent : m_brushText;
+        } else if (m_cleanCooldown > 0) {
+            // 冷却中：暗色
+            float avail = GetAvailableMemoryGB();
+            wchar_t buf[16];
+            swprintf_s(buf, L"%.1fG", avail);
+            cleanTxt = buf;
+            cleanBrush = m_brushSeparator ? m_brushSeparator : m_brushText;
+        } else {
+            // 正常：显示可用内存
+            float avail = GetAvailableMemoryGB();
+            wchar_t buf[16];
+            swprintf_s(buf, L"%.1fG", avail);
+            cleanTxt = buf;
+            // 悬停时用 accent 色，否则用文字色
+            cleanBrush = (m_cleanHover && m_brushAccent) ? m_brushAccent : m_brushText;
+        }
+        // 记录按钮区域（物理像素，供 WM_NCHITTEST 用）
+        float charW = fontSizePx * 0.62f;
+        float btnW = cleanTxt.size() * charW + padX * 0.6f;
+        m_cleanBtnRect.left = static_cast<LONG>(x);
+        m_cleanBtnRect.top = static_cast<LONG>(y - 2);
+        m_cleanBtnRect.right = static_cast<LONG>(x + btnW);
+        m_cleanBtnRect.bottom = static_cast<LONG>(y + fontSizePx + 2);
+        DrawTextLeft(ctx, cleanTxt, cleanBrush, m_monoFormat, fontSizePx, 0, x, y);
+        prevGroupDrawn = true;
+    } else {
+        // 按钮关闭时清零 rect，不拦截鼠标
+        m_cleanBtnRect = {0, 0, 0, 0};
+    }
 }
 
 void OverlayWindow::DrawTextLeft(ID2D1DeviceContext* ctx, const std::wstring& text,
@@ -752,10 +807,110 @@ LRESULT OverlayWindow::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DISPLAYCHANGE:
             UpdatePosition();
             return 0;
+        case WM_NCHITTEST: {
+            // 区域级鼠标穿透：按钮区域返回 HTCLIENT，其余返回 HTTRANSPARENT
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            ScreenToClient(m_hwnd, &pt);
+            if (m_config.showCleanBtn &&
+                pt.x >= m_cleanBtnRect.left && pt.x <= m_cleanBtnRect.right &&
+                pt.y >= m_cleanBtnRect.top && pt.y <= m_cleanBtnRect.bottom) {
+                return HTCLIENT;
+            }
+            // 鼠标离开按钮区域时重置悬停状态（非按钮区域返回 HTTRANSPARENT，
+            // 不会再收到 WM_MOUSEMOVE，所以在此处重置）
+            if (m_cleanHover) {
+                m_cleanHover = false;
+            }
+            return HTTRANSPARENT;
+        }
+        case WM_MOUSEMOVE: {
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            bool hover = (pt.x >= m_cleanBtnRect.left && pt.x <= m_cleanBtnRect.right &&
+                          pt.y >= m_cleanBtnRect.top && pt.y <= m_cleanBtnRect.bottom);
+            if (hover != m_cleanHover) {
+                m_cleanHover = hover;
+                // 鼠标进入按钮时切换为手型
+                SetCursor(LoadCursor(nullptr, hover ? IDC_HAND : IDC_ARROW));
+            }
+            return 0;
+        }
+        case WM_LBUTTONDOWN: {
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            if (pt.x >= m_cleanBtnRect.left && pt.x <= m_cleanBtnRect.right &&
+                pt.y >= m_cleanBtnRect.top && pt.y <= m_cleanBtnRect.bottom) {
+                if (m_cleanCooldown == 0 && !m_cleaning) {
+                    CleanMemory();
+                }
+            }
+            return 0;
+        }
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
         default:
             return m_hwnd ? DefWindowProcW(m_hwnd, msg, wp, lp) : 0;
     }
+}
+
+// ============================================================
+//  内存清理按钮
+// ============================================================
+
+float OverlayWindow::GetAvailableMemoryGB() {
+    MEMORYSTATUSEX memInfo{};
+    memInfo.dwLength = sizeof(memInfo);
+    if (GlobalMemoryStatusEx(&memInfo)) {
+        return static_cast<float>(memInfo.ullAvailPhys) /
+               (1024.0f * 1024.0f * 1024.0f);
+    }
+    return 0.0f;
+}
+
+void OverlayWindow::CleanMemory() {
+    if (m_cleaning || m_cleanCooldown > 0) return;
+
+    m_cleaning = true;
+    float beforeGB = GetAvailableMemoryGB();
+
+    // 后台线程执行清理，避免阻塞 UI 渲染
+    std::thread([this, beforeGB]() {
+        // 枚举所有进程，裁剪每个进程的工作集（Working Set）
+        // 这会将进程的内存页面从物理内存换出到页面文件，释放物理内存
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe{};
+            pe.dwSize = sizeof(pe);
+            if (Process32FirstW(snap, &pe)) {
+                do {
+                    HANDLE hProc = OpenProcess(
+                        PROCESS_SET_QUOTA, FALSE, pe.th32ProcessID);
+                    if (hProc) {
+                        EmptyWorkingSet(hProc);
+                        CloseHandle(hProc);
+                    }
+                } while (Process32NextW(snap, &pe));
+            }
+            CloseHandle(snap);
+        }
+
+        // 也裁剪当前进程的工作集
+        EmptyWorkingSet(GetCurrentProcess());
+
+        // 短暂等待让系统回收页面
+        Sleep(200);
+
+        float afterGB = GetAvailableMemoryGB();
+        float freed = afterGB - beforeGB;
+        if (freed < 0) freed = 0;
+
+        m_cleanFreedGB = freed;
+        m_cleanShowFrames = 2;   // 显示释放量 2 秒
+        m_cleanCooldown = 5;     // 5 秒冷却
+        m_cleaning = false;
+    }).detach();
+}
+
+void OverlayWindow::TickClean() {
+    if (m_cleanCooldown > 0) m_cleanCooldown--;
+    if (m_cleanShowFrames > 0) m_cleanShowFrames--;
 }

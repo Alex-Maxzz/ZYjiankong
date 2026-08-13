@@ -37,6 +37,7 @@ struct DisplayConfig {
 
     bool hideOnFullscreen = true;        // 全屏时自动隐藏
     bool runOnStartup     = false;       // 开机启动
+    bool showCleanBtn     = false;       // 内存清理按钮（点击清理可用内存）
 };
 
 class AppConfig {

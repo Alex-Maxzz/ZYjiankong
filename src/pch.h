@@ -22,6 +22,7 @@
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
+#include <tlhelp32.h>
 
 // DWM taskbar blur
 #include <dwmapi.h>
@@ -49,6 +50,8 @@
 // Network monitoring (GetIfTable2 needs netioapi.h)
 #include <iphlpapi.h>
 #include <netioapi.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
 
 // WMI
 #include <wbemidl.h>

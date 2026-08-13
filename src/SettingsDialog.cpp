@@ -248,7 +248,7 @@ static void PageShow(float y) {
         {L"CPU 温度", dc.showCpuTemp, 100}, {L"CPU 占用率", dc.showCpuUsage, 101},
         {L"GPU 温度", dc.showGpuTemp, 102}, {L"GPU 占用率", dc.showGpuUsage, 103},
         {L"内存占用", dc.showMemUsage, 104}, {L"网络上行", dc.showNetUp, 105},
-        {L"网络下行", dc.showNetDown, 106},
+        {L"网络下行", dc.showNetDown, 106}, {L"内存清理按钮", dc.showCleanBtn, 107},
     };
     for (auto& it : items) {
         Txt(it.l, T::kPad+4, y+6, T::kText);
@@ -500,7 +500,7 @@ static void Apply() {
     oc.netUpColor=dc.netUpColor; oc.netDownColor=dc.netDownColor;
     oc.fontFamily=dc.fontFamily; oc.tempLowThreshold=dc.tempLowThreshold;
     oc.tempHighThreshold=dc.tempHighThreshold; oc.spacingScale=dc.spacingScale;
-    oc.overlayOpacity=dc.overlayOpacity;
+    oc.overlayOpacity=dc.overlayOpacity; oc.showCleanBtn=dc.showCleanBtn;
     OverlayWindow::Instance().SetConfig(oc);
 }
 
@@ -511,8 +511,8 @@ static void Click(int id) {
     if (id == 999) { SettingsDialog::Close(); return; }
     if (id >= 900 && id < 900+TAB_N) { g_tab = id-900; InvalidateRect(g_hwnd,nullptr,FALSE); return; }
     // 显示开关
-    if (id >= 100 && id <= 106) {
-        bool* f[] = {&dc.showCpuTemp,&dc.showCpuUsage,&dc.showGpuTemp,&dc.showGpuUsage,&dc.showMemUsage,&dc.showNetUp,&dc.showNetDown};
+    if (id >= 100 && id <= 107) {
+        bool* f[] = {&dc.showCpuTemp,&dc.showCpuUsage,&dc.showGpuTemp,&dc.showGpuUsage,&dc.showMemUsage,&dc.showNetUp,&dc.showNetDown,&dc.showCleanBtn};
         *f[id-100] = !*f[id-100]; ch = true;
     }
     // 外观
