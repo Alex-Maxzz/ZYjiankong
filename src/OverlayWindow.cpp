@@ -912,21 +912,74 @@ enum SystemMemoryListCommand : ULONG {
     kMemPurgeTransitionList         = 7,
 };
 
-// 启用 SeProfSingleProcessPrivilege（管理员令牌中有但默认未启用）
+// 诊断日志：写入 EXE 同目录下 clean_log.txt
+static void CleanLog(const wchar_t* fmt, ...) {
+    wchar_t buf[512];
+    va_list args;
+    va_start(args, fmt);
+    _vsnwprintf_s(buf, _countof(buf), _TRUNCATE, fmt, args);
+    va_end(args);
+
+    // 加时间戳
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t line[600];
+    _snwprintf_s(line, _countof(line), _TRUNCATE, L"[%02d:%02d:%02d.%03d] %s\r\n",
+                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+
+    // 写入文件（追加模式）
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    PathRemoveFileSpecW(path);
+    wcscat_s(path, MAX_PATH, L"\\clean_log.txt");
+
+    HANDLE hFile = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ,
+                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(hFile, line, (DWORD)(wcslen(line) * sizeof(wchar_t)), &written, nullptr);
+        CloseHandle(hFile);
+    }
+    OutputDebugStringW(line);
+}
+
+// NTSTATUS 转可读字符串
+static const wchar_t* NtStatusName(LONG status) {
+    if (status == 0)                return L"SUCCESS";
+    if (status == (LONG)0xC0000004) return L"INFO_LENGTH_MISMATCH";
+    if (status == (LONG)0xC000000D) return L"INVALID_PARAMETER";
+    if (status == (LONG)0xC0000061) return L"PRIVILEGE_NOT_HELD";
+    if (status == (LONG)0xC0000022) return L"ACCESS_DENIED";
+    return L"UNKNOWN";
+}
+
+// 启用 SeProfileSingleProcessPrivilege（注意：完整拼写是 Profile 不是 Prof）
 static bool EnableProfilePrivilege() {
     HANDLE hToken = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(),
-            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
+        CleanLog(L"EnablePrivilege: OpenProcessToken FAILED err=%lu", GetLastError());
         return false;
+    }
     TOKEN_PRIVILEGES tp{};
     tp.PrivilegeCount = 1;
-    LookupPrivilegeValueW(nullptr, L"SeProfSingleProcessPrivilege",
-                          &tp.Privileges[0].Luid);
+    BOOL found = LookupPrivilegeValueW(nullptr, L"SeProfileSingleProcessPrivilege",
+                                       &tp.Privileges[0].Luid);
+    if (!found) {
+        CleanLog(L"EnablePrivilege: LookupPrivilegeValue FAILED err=%lu (privilege not found)",
+                 GetLastError());
+        CloseHandle(hToken);
+        return false;
+    }
     tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    AdjustTokenPrivileges(hToken, FALSE, &tp, 0, nullptr, nullptr);
-    bool ok = (GetLastError() == ERROR_SUCCESS);
+    SetLastError(ERROR_SUCCESS);
+    BOOL ok = AdjustTokenPrivileges(hToken, FALSE, &tp, 0, nullptr, nullptr);
+    DWORD err = GetLastError();
     CloseHandle(hToken);
-    return ok;
+    CleanLog(L"EnablePrivilege: AdjustToken=%d err=%lu (%s)",
+             ok, err, err == ERROR_SUCCESS ? L"OK" :
+             err == ERROR_NOT_ALL_ASSIGNED ? L"NOT_ALL_ASSIGNED" : L"OTHER");
+    return ok && err == ERROR_SUCCESS;
 }
 
 float OverlayWindow::GetAvailableMemoryGB() {
@@ -949,6 +1002,7 @@ void OverlayWindow::CleanMemory() {
     SetTimer(m_hwnd, kTimerCleanAnim, 16, nullptr);
 
     float beforeGB = GetAvailableMemoryGB();
+    CleanLog(L"=== CleanMemory START === before=%.3fG", beforeGB);
 
     // 后台线程执行系统级内存清理
     std::thread([this, beforeGB]() {
@@ -962,33 +1016,53 @@ void OverlayWindow::CleanMemory() {
                 if (freed < 0) freed = 0;
                 self->m_cleanFreedGB = freed;
                 self->m_cleaning = false;
+                CleanLog(L"=== CleanMemory END === after=%.3fG freed=%.3fG", afterGB, freed);
             }
         } guard{this, beforeGB};
 
-        // 关键：启用 SeProfSingleProcessPrivilege，否则 NtSetSystemInformation 返回 STATUS_PRIVILEGE_NOT_HELD
+        // 启用特权（Mem Reduct 不需要这步，但有些系统可能需要）
         EnableProfilePrivilege();
 
         HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
-        if (hNtdll) {
-            auto NtSetSysInfo = reinterpret_cast<pNtSetSystemInformation>(
-                GetProcAddress(hNtdll, "NtSetSystemInformation"));
-            if (NtSetSysInfo) {
-                // 1. 清空所有进程工作集（系统级一次调用）
-                ULONG cmd = kMemEmptyWorkingSets;
-                NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
+        if (!hNtdll) {
+            CleanLog(L"ERROR: ntdll.dll not loaded");
+            return;
+        }
 
-                // 2. 清空备用列表（核心释放步骤，释放大量缓存内存）
-                cmd = kMemPurgeStandbyList;
-                NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
+        auto NtSetSysInfo = reinterpret_cast<pNtSetSystemInformation>(
+            GetProcAddress(hNtdll, "NtSetSystemInformation"));
+        if (!NtSetSysInfo) {
+            CleanLog(L"ERROR: NtSetSystemInformation not found in ntdll");
+            return;
+        }
 
-                // 3. 清空低优先级备用列表
-                cmd = kMemPurgeLowPriorityStandbyList;
-                NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
-            }
+        CleanLog(L"NtSetSystemInformation ptr=%p, class=0x%X", NtSetSysInfo, kSystemMemoryListInformation);
+
+        // 1. 清空所有进程工作集
+        {
+            ULONG cmd = kMemEmptyWorkingSets;
+            LONG status = NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
+            CleanLog(L"  [1] EmptyWorkingSets(5) sizeof=%zu → 0x%08X (%s)",
+                     sizeof(cmd), (unsigned)status, NtStatusName(status));
+        }
+
+        // 2. 清空备用列表（核心释放步骤）
+        {
+            ULONG cmd = kMemPurgeStandbyList;
+            LONG status = NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
+            CleanLog(L"  [2] PurgeStandbyList(1) sizeof=%zu → 0x%08X (%s)",
+                     sizeof(cmd), (unsigned)status, NtStatusName(status));
+        }
+
+        // 3. 清空低优先级备用列表
+        {
+            ULONG cmd = kMemPurgeLowPriorityStandbyList;
+            LONG status = NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
+            CleanLog(L"  [3] PurgeLowPriorityStandbyList(0) sizeof=%zu → 0x%08X (%s)",
+                     sizeof(cmd), (unsigned)status, NtStatusName(status));
         }
 
         Sleep(200);  // 等待系统回收页面
-        // guard 析构时自动计算 freed 并设置 m_cleaning = false
     }).detach();
 }
 
