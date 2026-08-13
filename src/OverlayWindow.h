@@ -39,6 +39,9 @@ struct OverlayConfig {
     // 布局
     float    spacingScale      = 1.0f;
     float    overlayOpacity    = 1.0f;
+
+    // 内存清理按钮
+    bool     showCleanBtn      = false;  // 悬浮条右端显示可用内存，点击清理
 };
 
 class OverlayWindow {
@@ -107,6 +110,11 @@ private:
     static std::wstring FormatTemp(float temp);
     static std::wstring FormatPercent(float pct);
 
+    // 内存清理按钮
+    void CleanMemory();
+    static float GetAvailableMemoryGB();
+    void TickClean();  // 每秒调用：倒计时冷却和结果显示
+
     HWND                    m_hwnd{nullptr};
     OverlayConfig           m_config{};
     bool                    m_inited{false};
@@ -145,4 +153,12 @@ private:
 
     UINT                    m_dpi{96};
     int                     m_taskbarHeight{48};
+
+    // 内存清理按钮状态
+    RECT     m_cleanBtnRect{0,0,0,0};  // 物理像素，WM_NCHITTEST 用
+    int      m_cleanCooldown{0};       // 冷却倒计时（秒）
+    int      m_cleanShowFrames{0};     // 显示释放量的帧数（秒）
+    float    m_cleanFreedGB{0};        // 最近一次释放的内存（GB）
+    bool     m_cleanHover{false};      // 鼠标悬停
+    bool     m_cleaning{false};        // 正在清理中（后台线程）
 };

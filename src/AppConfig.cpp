@@ -113,6 +113,7 @@ bool AppConfig::Load() {
 
     m_cfg.hideOnFullscreen = getBool("hideOnFullscreen", true);
     m_cfg.runOnStartup     = IsStartupEnabled();
+    m_cfg.showCleanBtn     = getBool("showCleanBtn", false);
 
     // ---- 配置校验：异常值回退默认 ----
     if (m_cfg.fontSize < 8.0f || m_cfg.fontSize > 24.0f) m_cfg.fontSize = 12.0f;
@@ -168,7 +169,8 @@ bool AppConfig::Save() {
         "  \"spacingScale\": %.2f,\n"
         "  \"overlayOpacity\": %.2f,\n"
         "  \"hideOnFullscreen\": %s,\n"
-        "  \"runOnStartup\": %s\n"
+        "  \"runOnStartup\": %s,\n"
+        "  \"showCleanBtn\": %s\n"
         "}\n",
         m_cfg.showCpuTemp      ? "true" : "false",
         m_cfg.showCpuUsage     ? "true" : "false",
@@ -192,7 +194,8 @@ bool AppConfig::Save() {
         m_cfg.spacingScale,
         m_cfg.overlayOpacity,
         m_cfg.hideOnFullscreen ? "true" : "false",
-        m_cfg.runOnStartup     ? "true" : "false");
+        m_cfg.runOnStartup     ? "true" : "false",
+        m_cfg.showCleanBtn     ? "true" : "false");
 
     DWORD written = 0;
     BOOL writeOk = WriteFile(h, buf, static_cast<DWORD>(n), &written, nullptr);
