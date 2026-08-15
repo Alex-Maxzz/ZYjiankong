@@ -46,6 +46,7 @@ enum : UINT {
 
 static HMENU g_hMenu = nullptr;
 static HICON g_hAppIcon = nullptr;  // 应用图标（从资源加载）
+static UINT g_uTaskbarRestart = 0;  // TaskbarCreated 消息（Explorer 重启/就绪时广播）
 
 // ===================== 托盘图标 =====================
 
@@ -103,6 +104,7 @@ static void ApplyConfigToOverlay() {
     oc.tempHighThreshold = dc.tempHighThreshold;
     oc.spacingScale      = dc.spacingScale;
     oc.overlayOpacity    = dc.overlayOpacity;
+    oc.showCleanBtn      = dc.showCleanBtn;
     OverlayWindow::Instance().SetConfig(oc);
 }
 
@@ -324,6 +326,12 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             PostQuitMessage(0);
             return 0;
         default:
+            // Explorer 任务栏通知区就绪/重启：重新添加托盘图标
+            // （开机启动时 shell 可能尚未就绪导致首次 AddTrayIcon 失败）
+            if (msg == g_uTaskbarRestart) {
+                AddTrayIcon(hwnd);
+                return 0;
+            }
             return DefWindowProcW(hwnd, msg, wp, lp);
     }
 }
@@ -345,6 +353,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR cmdLine, int) {
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(hr)) return 1;
+
+    // 注册 Explorer 任务栏就绪通知（必须在注册窗口类之前）
+    g_uTaskbarRestart = RegisterWindowMessageW(L"TaskbarCreated");
 
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
@@ -396,6 +407,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR cmdLine, int) {
     oc.tempHighThreshold = dc.tempHighThreshold;
     oc.spacingScale      = dc.spacingScale;
     oc.overlayOpacity    = dc.overlayOpacity;
+    oc.showCleanBtn      = dc.showCleanBtn;
     if (!OverlayWindow::Instance().Create(oc)) {
         if (!silent) MessageBoxW(nullptr, L"悬浮窗创建失败", kAppTitle, MB_ICONWARNING);
     }
