@@ -115,6 +115,7 @@ private:
     static float GetAvailableMemoryGB();
     void TickClean();           // 每秒调用：倒计时冷却
     void AdvanceCleanAnim();    // 动画帧推进（60fps 定时器驱动）
+    void JoinCleanThread();     // 等待后台清理线程结束（防析构后悬空写入）
 
     HWND                    m_hwnd{nullptr};
     OverlayConfig           m_config{};
@@ -170,4 +171,5 @@ private:
     float m_cleanOffsetX{0};       // 渲染 X 偏移（物理像素）
     float m_cleanAlpha{1.0f};      // 透明度 0-1
     int   m_cleanTick{0};          // 全局帧计数（用于 "..." 脉冲）
+    std::thread m_cleanThread;     // 后台清理线程（析构前必须 join，防止 use-after-free）
 };

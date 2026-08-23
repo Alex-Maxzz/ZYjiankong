@@ -44,8 +44,8 @@ private:
 
     // 各采集器
     void CollectCpuUsage();
-    void CollectCpuTemp();          // WMI 慢速
-    void CollectGpu();              // WMI 慢速
+    void CollectCpuTemp();          // PawnIO → LHM HTTP → WMI 四层降级
+    void CollectGpu();              // NVAPI
     void CollectMemory();
     void CollectNetwork();
 
@@ -72,9 +72,6 @@ private:
     bool     m_netFirstSample{true};  // 首次采样只记录基准，不计算速率
     std::chrono::steady_clock::time_point m_prevNetTime;
 
-    // 慢速指标时间戳
-    std::chrono::steady_clock::time_point m_prevSlowTime;
-
     // HTTP 温度源失败缓存（避免每秒重试阻塞循环）
     std::chrono::steady_clock::time_point m_lhmFailTime{};
     bool     m_lhmFailed{false};
@@ -90,7 +87,7 @@ private:
 
     // GPU 连续失败计数（同上，防止 NVAPI 失败时显示冻结值）
     int      m_gpuFailCount{0};
-    static constexpr int kGpuFailMax = 3;  // GPU 5 秒采一次，3 次=15 秒无数据则重置
+    static constexpr int kGpuFailMax = 10;  // GPU 每秒采一次，连续 10 秒无数据则重置
 
     // WMI 句柄
     IWbemLocator*  m_wmiLocator{nullptr};

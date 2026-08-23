@@ -2,6 +2,10 @@
 // 通过 PawnIO 签名驱动读取 AMD Ryzen PM Table（精确 Tctl/Tdie 温度）
 #include "pch.h"
 #include "PawnIo.h"
+#include <softpub.h>
+#include <wintrust.h>
+
+#pragma comment(lib, "wintrust.lib")
 
 // 资源 ID（app.rc 中定义）
 #define IDR_RYZENSMU_BLOB 200
@@ -326,6 +330,32 @@ bool PawnIo::Reinit() {
 
 // ===================== 驱动健康检测与自动恢复 =====================
 
+// 验证文件 Authenticode 签名（WinVerifyTrust，完整证书链 + 未过期/未吊销校验）。
+// 从网络下载的驱动安装器必须验签通过才允许静默安装——本程序以管理员运行，
+// 安装未经签名验证的可执行文件等于给供应链攻击开后门。
+static bool VerifyFileSignature(const wchar_t* filePath) {
+    WINTRUST_FILE_INFO fileInfo = {};
+    fileInfo.cbStruct       = sizeof(fileInfo);
+    fileInfo.pcwszFilePath  = filePath;
+
+    GUID actionGenericVerifyV2 = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+
+    WINTRUST_DATA wd = {};
+    wd.cbStruct            = sizeof(wd);
+    wd.dwStateAction       = WTD_STATEACTION_VERIFY;   // 完整验证（含 CRL 检查）
+    wd.dwUIChoice          = WTD_UI_NONE;              // 静默，不弹任何 UI
+    wd.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN;    // 校验整条证书链吊销状态
+    wd.dwUnionChoice       = WTD_CHOICE_FILE;
+    wd.pFile               = &fileInfo;
+
+    LONG st = WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE),
+                             &actionGenericVerifyV2, &wd);
+    // 释放验证状态（与 WTD_STATEACTION_VERIFY 配对）
+    wd.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &actionGenericVerifyV2, &wd);
+    return st == ERROR_SUCCESS;
+}
+
 bool PawnIo::IsDriverInstalled() {
     SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
     if (!scm) return false;
@@ -470,6 +500,14 @@ bool PawnIo::RecoverDriverNetwork() {
     CloseHandle(hCheck);
 
     if (fileSize.QuadPart < 1024 * 1024) {  // < 1MB，下载失败
+        DeleteFileW(exePath.c_str());
+        DeleteFileW(tempFile);
+        return false;
+    }
+
+    // 安全检查：下载的安装器必须通过 Authenticode 验签才允许静默安装
+    // （本程序以管理员运行，未验签的内核驱动安装器 = 供应链攻击入口）
+    if (!VerifyFileSignature(exePath.c_str())) {
         DeleteFileW(exePath.c_str());
         DeleteFileW(tempFile);
         return false;

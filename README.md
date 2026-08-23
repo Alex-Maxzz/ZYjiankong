@@ -28,11 +28,11 @@
 | CPU 温度 | 摄氏度（Tctl/Tdie） | **PawnIO 驱动**读取 AMD Ryzen SMU PM Table |
 | CPU 占用 | 0–100% | 轻量 API（Idle/Kernel/User 差值） |
 | GPU 温度 | 摄氏度 | **NVAPI**（动态加载 `nvapi64.dll`） |
-| GPU 占用 | 0–100% | NVAPI Dynamic P-States |
+| GPU 占用 | 0–100% | NVAPI（GPU 引擎占用率） |
 | 内存占用 | 0–100% | 性能计数器 |
 | 网络 ↑ / ↓ | bytes/s，自动换算 K/M/G | 网络接口计数器差值 |
 
-> 采集策略：高频指标（CPU 占用、内存、网络）走轻量 API **每秒** 刷新；慢速指标（温度等）走 **WMI 每 5 秒** 一次，避免拖慢主循环。温度连续失败会自动复位为「-1（无效）」，不会显示冻结的假数据。
+> 采集策略：所有指标**每秒**刷新一次。CPU 占用/内存/网络走轻量系统 API；CPU 温度走 PawnIO 驱动（内存拷贝级开销）；GPU 温度/占用走 NVAPI 动态查询，开销同样很小。各数据源失败时有独立退避与过期保护（连续失败自动复位为「-1（无效）」），不会显示冻结的假数据。
 
 ---
 
@@ -45,6 +45,12 @@
 | **管理员权限** | 访问 PawnIO 驱动 + 任务计划程序自启 | 建议以管理员运行；manifest 已声明 `requireAdministrator` |
 
 > 未安装 PawnIO 或没给管理员权限时，程序仍可正常运行，只是 CPU 温度读不到（其余指标不受影响）。
+
+### ⚠️ 关于驱动自动安装与安全
+
+- 本程序检测到 PawnIO 驱动缺失时，会从程序内置资源**静默安装** PawnIO（无需你手动操作）；若内置安装失败，也会尝试从 GitHub 官方 Release（[namazso/PawnIO.Setup](https://github.com/namazso/PawnIO.Setup)）下载后安装——**下载的安装器必须通过 Authenticode 数字签名验证才会执行**。
+- PawnIO 是有签名的内核驱动，被 FanControl、LibreHardwareMonitor 等主流开源硬件监控工具采用，用于替代已被 Microsoft Defender 标记为漏洞驱动的 WinRing0。
+- **已知限制**：PawnIO 当前签名证书曾被部分反作弊系统（如 FACEIT AC）列入阻止名单。如果你玩依赖 FACEIT 反作弊的游戏，PawnIO 可能无法加载（表现为本工具没有 CPU 温度），详见 [PawnIO issue #1](https://github.com/namazso/PawnIO.Setup/issues/1)。
 
 ---
 

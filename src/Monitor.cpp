@@ -35,25 +35,17 @@ bool Monitor::Start() {
         }
 
         // 初始化首次时间戳
-        m_prevSlowTime = std::chrono::steady_clock::now() - std::chrono::seconds(10);
         m_prevNetTime  = std::chrono::steady_clock::now();
 
-        // 采集循环：每秒一次快指标，每 5 秒一次慢指标
+        // 采集循环：每秒一次全部指标
         while (m_running.load()) {
             try {
-                auto now = std::chrono::steady_clock::now();
-
                 // 快指标（轻量，1s）
                 CollectCpuUsage();
                 CollectCpuTemp();   // PawnIO 读 PM Table = 内存拷贝，微秒级
                 CollectMemory();
                 CollectNetwork();
-
-                // 慢指标（WMI/NVAPI 较重，5s）
-                if (now - m_prevSlowTime >= std::chrono::seconds(5)) {
-                    m_prevSlowTime = now;
-                    CollectGpu();
-                }
+                CollectGpu();       // NVAPI 动态加载查询，开销小，同样 1s 刷新
             } catch (...) {
                 // 防止异常穿透线程导致 terminate + COM 泄漏
             }

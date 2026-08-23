@@ -90,6 +90,9 @@ void OverlayWindow::BringToTop() {
 }
 
 void OverlayWindow::Destroy() {
+    // 窗口销毁前先等后台清理线程退出（线程会写 m_cleaning/m_cleanFreedGB 等成员）
+    JoinCleanThread();
+    KillTimer(m_hwnd, kTimerCleanAnim);
     // 先销毁窗口（阻止后续消息分发），再释放 COM 资源
     if (m_hwnd) {
         DestroyWindow(m_hwnd);
@@ -955,7 +958,10 @@ void OverlayWindow::CleanMemory() {
     float beforeGB = GetAvailableMemoryGB();
 
     // 后台线程执行系统级内存清理
-    std::thread([this, beforeGB]() {
+    // 注意：线程作为成员变量持有，Destroy() 时 JoinCleanThread() 等待其退出，
+    // 避免 detach 线程在对象析构后写成员导致 use-after-free
+    JoinCleanThread();  // 上一次已结束的线程先收尾（正常情况下早已 join 完）
+    m_cleanThread = std::thread([this, beforeGB]() {
         // RAII 保底：无论线程是否异常，都确保 m_cleaning 被复位
         struct CleanGuard {
             OverlayWindow* self;
@@ -1000,7 +1006,15 @@ void OverlayWindow::CleanMemory() {
         NtSetSysInfo(kSystemMemoryListInformation, &cmd, sizeof(cmd));
 
         Sleep(300);  // 等待系统回收页面
-    }).detach();
+    });
+}
+
+void OverlayWindow::JoinCleanThread() {
+    // 线程函数会写 m_cleaning/m_cleanFreedGB 等成员，
+    // 对象销毁前必须等待其退出；joinable 检查兼容"从未启动过线程"的情况
+    if (m_cleanThread.joinable()) {
+        m_cleanThread.join();
+    }
 }
 
 void OverlayWindow::AdvanceCleanAnim() {
