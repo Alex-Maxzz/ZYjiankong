@@ -695,9 +695,12 @@ bool PawnIo::RecoverDriverNetwork(bool repairBroken) {
         if (dwSize == 0) break;
         std::vector<char> buffer(dwSize);
         DWORD dwDownloaded = 0;
-        if (WinHttpReadData(hRequest, buffer.data(), dwSize, &dwDownloaded)) {
-            WriteFile(hFile, buffer.data(), dwDownloaded, &written, nullptr);
+        if (!WinHttpReadData(hRequest, buffer.data(), dwSize, &dwDownloaded) || dwDownloaded == 0) {
+            // 读取失败时必须跳出：WinHttpQueryDataAvailable 仍会返回同一长度，
+            // 继续循环会变成死循环，把后台线程永久卡住、重装按钮一直停在 busy 态。
+            break;
         }
+        WriteFile(hFile, buffer.data(), dwDownloaded, &written, nullptr);
     } while (dwSize > 0);
 
     CloseHandle(hFile);
