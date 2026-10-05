@@ -396,13 +396,25 @@ static void PageNet(float y) {
     for (int i = 0; i < 6; i++) Swatch(T::kPad+i*34.f, y, 26, kNetColors[i], kNetColors[i]==dc.netDownColor, 520+i);
 }
 
-// 驱动恢复状态文本（线程安全）
+// 驱动恢复状态（线程安全）
 static std::wstring g_driverMsg;
 static bool g_driverBusy = false;
+// 驱动状态缓存：QueryDriverState() 会调 SetupDiGetClassDevs / CM_Get_DevNode_Status，
+// 属重量级 PnP API。放在 WM_PAINT 渲染路径里反复调用会与系统 PnP 管理器
+// 争抢全局句柄锁，导致切到驱动页时连续重绘崩溃。故只在需要时刷新一次并缓存。
+static PawnIo::DriverState g_driverState = PawnIo::DriverState::Missing;
+static bool g_driverStateValid = false;
+
+// 在非渲染路径刷新驱动状态缓存
+static void RefreshDriverState() {
+    g_driverState = PawnIo::QueryDriverState();
+    g_driverStateValid = true;
+}
 
 static void PageDriver(float y) {
     Txt(L"PawnIO 驱动状态", T::kPad+4, y+6, T::kText);
-    const auto state = PawnIo::QueryDriverState();
+    if (!g_driverStateValid) RefreshDriverState();
+    const auto state = g_driverState;
     // 三态：已安装 / 未安装 / 已损坏（半残，需深度修复）
     const bool corrupted  = (state == PawnIo::DriverState::Corrupted);
     const bool installed  = (state == PawnIo::DriverState::Installed);
@@ -517,7 +529,13 @@ static void Click(int id) {
     DisplayConfig dc = AppConfig::Instance().Get();
     bool ch = false;
     if (id == 999) { SettingsDialog::Close(); return; }
-    if (id >= 900 && id < 900+TAB_N) { g_tab = id-900; InvalidateRect(g_hwnd,nullptr,FALSE); return; }
+    if (id >= 900 && id < 900+TAB_N) {
+        g_tab = id-900;
+        // 切到驱动页时刷新一次状态缓存（查询放在此处而非 WM_PAINT 里）
+        if (g_tab == TAB_DRIVER) RefreshDriverState();
+        InvalidateRect(g_hwnd,nullptr,FALSE);
+        return;
+    }
     // 显示开关
     if (id >= 100 && id <= 107) {
         bool* f[] = {&dc.showCpuTemp,&dc.showCpuUsage,&dc.showGpuTemp,&dc.showGpuUsage,&dc.showMemUsage,&dc.showNetUp,&dc.showNetDown,&dc.showCleanBtn};
@@ -542,7 +560,8 @@ static void Click(int id) {
     // 驱动恢复（后台线程，避免卡 UI）
     if ((id == 700 || id == 701) && !g_driverBusy) {
         g_driverBusy = true;
-        const bool wasCorrupted = (PawnIo::QueryDriverState() == PawnIo::DriverState::Corrupted);
+        RefreshDriverState();
+        const bool wasCorrupted = (g_driverState == PawnIo::DriverState::Corrupted);
         g_driverMsg = id == 700 ? L"正在从本地资源恢复..." : L"正在从网络下载...";
         if (wasCorrupted) g_driverMsg = L"检测到残留，正在清理后重装...";
         InvalidateRect(g_hwnd, nullptr, FALSE);
@@ -561,8 +580,7 @@ static void Click(int id) {
                 }
             } else {
                 // 失败时区分是清理失败还是安装失败，便于用户判断
-                const auto st = PawnIo::QueryDriverState();
-                if (st == PawnIo::DriverState::Corrupted) {
+                if (PawnIo::QueryDriverState() == PawnIo::DriverState::Corrupted) {
                     g_driverMsg = L"清理残留失败，请以管理员身份运行后重试";
                 } else {
                     g_driverMsg = useNetwork ? L"网络下载失败，请检查网络后重试"
@@ -570,7 +588,11 @@ static void Click(int id) {
                 }
             }
             g_driverBusy = false;
-            if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+            if (g_hwnd) {
+                // 修复完成后同步缓存，下一次重绘直接读缓存，不再进 PnP API
+                g_driverState = PawnIo::QueryDriverState();
+                InvalidateRect(g_hwnd, nullptr, FALSE);
+            }
         }).detach();
         return;
     }
@@ -738,6 +760,8 @@ void SettingsDialog::Show(HWND owner) {
     }
     LoadFonts();
     g_fontListOpen = false; g_fontScroll = 0;
+    // 驱动状态缓存作废，下次进入驱动页时重新查询
+    g_driverStateValid = false;
     // 从当前 textColor 初始化 HSV 状态
     {
         const DisplayConfig& dc = AppConfig::Instance().Get();

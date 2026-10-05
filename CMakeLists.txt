@@ -51,4 +51,9 @@ if(BUILD_VERIFY_TOOL)
     target_link_libraries(verify_pawnio PRIVATE
         setupapi cfgmgr32 shell32 user32 advapi32)
     target_link_options(verify_pawnio PRIVATE /MANIFEST:NO)
+
+    # 验收工具：模拟点击设置窗口各 Tab，验证驱动页不再崩溃
+    add_executable(test_settings_crash tools/test_settings_crash.cpp)
+    target_link_libraries(test_settings_crash PRIVATE user32 gdi32)
+    target_link_options(test_settings_crash PRIVATE /MANIFEST:NO)
 endif()
