@@ -15,14 +15,31 @@ public:
     void Shutdown();
     bool IsAvailable() const { return m_available; }
 
-    // 驱动健康检测：检查 PawnIO 内核驱动服务是否存在
+    // 驱动安装状态（三态）
+    enum class DriverState {
+        Missing,        // 完全没装
+        Corrupted,      // 半残：设备节点在但服务/sys 缺失（Code 19）
+        Installed       // 服务在且设备无故障
+    };
+
+    // 检测驱动状态。比 IsDriverInstalled 更严格：会检查设备节点 problem code，
+    // 能识别「设备在、驱动文件或服务键被删」的半残状态。
+    static DriverState QueryDriverState();
+
+    // 便捷判断：服务键与设备节点均正常才算已安装
     static bool IsDriverInstalled();
 
+    // 清理 PawnIO 驱动残留（删除 DriverStore 包 + 服务键 + 卸载注册表项）。
+    // 用于「深度修复」：安装器遇到半残状态会走进更新分支而失败，必须先清干净。
+    // 需要管理员权限。成功返回 true。
+    static bool PurgeDriver();
+
     // 从内嵌资源恢复驱动（静默安装），成功返回 true
-    static bool RecoverDriverEmbedded();
+    // repairBroken=true 时会先检测半残状态并自动深度清理再安装
+    static bool RecoverDriverEmbedded(bool repairBroken = true);
 
     // 从网络下载并安装驱动，成功返回 true
-    static bool RecoverDriverNetwork();
+    static bool RecoverDriverNetwork(bool repairBroken = true);
 
     // 读取 CPU 温度（Tctl/Tdie，摄氏度）
     // 返回 -1 表示失败

@@ -402,17 +402,25 @@ static bool g_driverBusy = false;
 
 static void PageDriver(float y) {
     Txt(L"PawnIO 驱动状态", T::kPad+4, y+6, T::kText);
-    bool installed = PawnIo::IsDriverInstalled();
-    // 状态指示点
-    uint32_t dotColor = installed ? 0xFF4ADE80 : 0xFFF87171;
+    const auto state = PawnIo::QueryDriverState();
+    // 三态：已安装 / 未安装 / 已损坏（半残，需深度修复）
+    const bool corrupted  = (state == PawnIo::DriverState::Corrupted);
+    const bool installed  = (state == PawnIo::DriverState::Installed);
+    const uint32_t dotColor = installed ? 0xFF4ADE80
+                             : corrupted ? 0xFFFBBF24 : 0xFFF87171;
     RR(T::kPad+120, y+8, 10, 10, 5, dotColor);
-    Txt(installed ? L"已安装" : L"未安装", T::kPad+136, y+6,
-        installed ? 0xFF4ADE80 : 0xFFF87171, g_f11);
+    Txt(installed ? L"已安装" : corrupted ? L"已损坏（需深度修复）" : L"未安装",
+        T::kPad+136, y+6, dotColor, g_f11);
     y += T::kRowH + 10;
 
     // 说明
     Txt(L"CPU 温度依赖 PawnIO 内核驱动，", T::kPad+4, y, T::kDim, g_f11); y += 18;
-    Txt(L"驱动可能被 Windows 安全更新清除。", T::kPad+4, y, T::kDim, g_f11);
+    if (corrupted) {
+        Txt(L"检测到驱动文件或服务缺失，", T::kPad+4, y, 0xFFFBBF24, g_f11); y += 18;
+        Txt(L"点击下方按钮将自动清理残留后重装。", T::kPad+4, y, 0xFFFBBF24, g_f11);
+    } else {
+        Txt(L"驱动可能被 Windows 安全更新清除。", T::kPad+4, y, T::kDim, g_f11);
+    }
     y += T::kRowH + 6;
 
     // 恢复按钮
@@ -420,7 +428,7 @@ static void PageDriver(float y) {
     // 重新安装（本地）
     RR(T::kPad, y, BASE_W - 2*T::kPad, 36, 8,
        enableBtns ? T::kCard : 0xFF1E1F35, T::kBorder);
-    Txt(L"重新安装（本地资源）", T::kPad+16, y+9,
+    Txt(L"重新安装（本地资源 · 自动清理残留）", T::kPad+16, y+9,
         enableBtns ? T::kText : T::kDim);
     if (enableBtns) Zone2(700, T::kPad, y, BASE_W - 2*T::kPad, 36);
     y += 44;
@@ -534,21 +542,32 @@ static void Click(int id) {
     // 驱动恢复（后台线程，避免卡 UI）
     if ((id == 700 || id == 701) && !g_driverBusy) {
         g_driverBusy = true;
+        const bool wasCorrupted = (PawnIo::QueryDriverState() == PawnIo::DriverState::Corrupted);
         g_driverMsg = id == 700 ? L"正在从本地资源恢复..." : L"正在从网络下载...";
+        if (wasCorrupted) g_driverMsg = L"检测到残留，正在清理后重装...";
         InvalidateRect(g_hwnd, nullptr, FALSE);
         bool useNetwork = (id == 701);
-        std::thread([useNetwork]() {
-            bool ok = useNetwork ? PawnIo::RecoverDriverNetwork()
-                                 : PawnIo::RecoverDriverEmbedded();
+        std::thread([useNetwork, wasCorrupted]() {
+            // repairBroken=true：半残状态下自动深度清理（删驱动包+服务键+卸载项）再重装
+            bool ok = useNetwork ? PawnIo::RecoverDriverNetwork(true)
+                                 : PawnIo::RecoverDriverEmbedded(true);
             if (ok) {
                 PawnIo::Instance().Reinit();
-                g_driverMsg = PawnIo::Instance().IsAvailable()
-                    ? L"驱动已恢复，CPU 温度可正常读取"
-                    : L"驱动已安装，但初始化失败";
+                if (PawnIo::Instance().IsAvailable()) {
+                    g_driverMsg = wasCorrupted ? L"残留已清理，驱动重装成功"
+                                              : L"驱动已恢复，CPU 温度可正常读取";
+                } else {
+                    g_driverMsg = L"驱动已安装，但初始化失败（尝试重启程序）";
+                }
             } else {
-                g_driverMsg = useNetwork
-                    ? L"网络下载失败，请检查网络后重试"
-                    : L"本地恢复失败，请尝试网络下载";
+                // 失败时区分是清理失败还是安装失败，便于用户判断
+                const auto st = PawnIo::QueryDriverState();
+                if (st == PawnIo::DriverState::Corrupted) {
+                    g_driverMsg = L"清理残留失败，请以管理员身份运行后重试";
+                } else {
+                    g_driverMsg = useNetwork ? L"网络下载失败，请检查网络后重试"
+                                            : L"本地恢复失败，请尝试网络下载";
+                }
             }
             g_driverBusy = false;
             if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);

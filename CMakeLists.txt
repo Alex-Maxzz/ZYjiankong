@@ -39,3 +39,16 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 # 嵌入自定义 manifest（requireAdministrator + Per-Monitor DPI）
 # 禁用 CMake 默认 manifest，由 app.rc 中的 manifest 资源替代
 target_link_options(${PROJECT_NAME} PRIVATE /MANIFEST:NO)
+
+# 验收工具：验证 PawnIO 驱动状态检测与清理逻辑（默认不构建）
+# 用法：cmake -S . -B build -DBUILD_VERIFY_TOOL=ON
+#      cmake --build build --config Release --target verify_pawnio
+#   verify_pawnio.exe           仅只读检测
+#   verify_pawnio.exe --purge   检测后执行深度清理（需管理员）
+option(BUILD_VERIFY_TOOL "构建 PawnIO 验收工具" OFF)
+if(BUILD_VERIFY_TOOL)
+    add_executable(verify_pawnio tools/verify_pawnio.cpp)
+    target_link_libraries(verify_pawnio PRIVATE
+        setupapi cfgmgr32 shell32 user32 advapi32)
+    target_link_options(verify_pawnio PRIVATE /MANIFEST:NO)
+endif()

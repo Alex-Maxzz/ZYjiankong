@@ -4,8 +4,12 @@
 #include "PawnIo.h"
 #include <softpub.h>
 #include <wintrust.h>
+#include <setupapi.h>
+#include <cfgmgr32.h>
 
 #pragma comment(lib, "wintrust.lib")
+#pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "cfgmgr32.lib")
 
 // 资源 ID（app.rc 中定义）
 #define IDR_RYZENSMU_BLOB 200
@@ -50,8 +54,9 @@ bool PawnIo::Init() {
     // 打开 PawnIO 设备（需要管理员权限）
     HRESULT hr = m_fnOpen(&m_handle);
     if (FAILED(hr) || !m_handle) {
-        // 驱动可能被 Windows 安全更新清除，尝试自动恢复
-        if (!IsDriverInstalled()) {
+        // 驱动缺失或处于半残状态（设备在、服务/sys 被删），尝试自动恢复。
+        // RecoverDriverEmbedded 内部会探测半残状态并先深度清理再重装。
+        if (QueryDriverState() != DriverState::Installed) {
             RecoverDriverEmbedded();
         }
         // 重试打开
@@ -356,17 +361,195 @@ static bool VerifyFileSignature(const wchar_t* filePath) {
     return st == ERROR_SUCCESS;
 }
 
-bool PawnIo::IsDriverInstalled() {
+// ===================== 驱动状态检测 =====================
+
+// PawnIO 设备所属的 class GUID（来自 oem163.inf 的 ClassGuid）
+static const GUID kPawnIoClassGuid = {
+    0x62f9c741, 0xb25a, 0x46ce, {0xb5, 0x4c, 0x9b, 0xcc, 0xce, 0x08, 0xb6, 0xf2}
+};
+
+// 打开服务键判断内核服务是否存在
+static bool QueryPawnIoService() {
     SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
     if (!scm) return false;
     SC_HANDLE svc = OpenServiceW(scm, L"PawnIO", SERVICE_QUERY_STATUS);
-    bool exists = (svc != nullptr);
+    const bool exists = (svc != nullptr);
     if (svc) CloseServiceHandle(svc);
     CloseServiceHandle(scm);
     return exists;
 }
 
-bool PawnIo::RecoverDriverEmbedded() {
+// 在给定设备列表中查找硬件 ID 认领 Root\PawnIO 的设备。
+// 命中时通过 devInstIdOut 回传设备实例 ID（供 CM_Get_DevNode_Status 查询故障码）。
+static bool FindPawnIoInDevList(HDEVINFO hDevInfo, std::wstring* devInstIdOut) {
+    SP_DEVINFO_DATA devInfo = {};
+    devInfo.cbSize = sizeof(devInfo);
+    for (DWORD i = 0;; ++i) {
+        if (!SetupDiEnumDeviceInfo(hDevInfo, i, &devInfo)) break;
+
+        DWORD reqSize = 0;
+        // SPDRP_HARDWAREID 是多字符串属性，先问大小再分配
+        SetupDiGetDeviceRegistryPropertyW(hDevInfo, &devInfo, SPDRP_HARDWAREID, nullptr,
+                                          nullptr, 0, &reqSize);
+        if (reqSize == 0) continue;
+
+        std::vector<BYTE> buf(reqSize, 0);
+        if (!SetupDiGetDeviceRegistryPropertyW(hDevInfo, &devInfo, SPDRP_HARDWAREID, nullptr,
+                                               buf.data(), reqSize, nullptr))
+            continue;
+        // 多字符串以连续 '\0' 结尾，按单个宽字符串读取即可命中
+        const std::wstring id((LPCWSTR)buf.data());
+        if (id.find(L"Root\\PawnIO") == std::wstring::npos) continue;
+
+        if (devInstIdOut) {
+            DWORD idSize = 0;
+            SetupDiGetDeviceInstanceIdW(hDevInfo, &devInfo, nullptr, 0, &idSize);
+            if (idSize > 0) {
+                std::vector<BYTE> idBuf(idSize, 0);
+                if (SetupDiGetDeviceInstanceIdW(hDevInfo, &devInfo, (PWSTR)idBuf.data(),
+                                               idSize, nullptr))
+                    *devInstIdOut = (LPCWSTR)idBuf.data();
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+// 用 CM_Get_DevNode_Status 读取设备的故障码（CM_PROB_*）。
+// 半残状态（设备节点在、服务/sys 被删）时这里返回 19。
+static bool QueryPawnIoProblemCode() {
+    HDEVINFO hDevInfo = SetupDiGetClassDevsW(&kPawnIoClassGuid, nullptr, nullptr,
+                                              DIGCF_PRESENT);
+    if (hDevInfo == INVALID_HANDLE_VALUE) return false;
+
+    std::wstring devInstId;
+    const bool found = FindPawnIoInDevList(hDevInfo, &devInstId);
+    SetupDiDestroyDeviceInfoList(hDevInfo);
+    if (!found || devInstId.empty()) return false;
+
+    DEVINST devInst = 0;
+    // CM_Locate_DevNodeW 的deviceID 参数为非常量 LPCWSTR
+    DEVINSTID_W devId = const_cast<DEVINSTID_W>(devInstId.c_str());
+    if (CM_Locate_DevNodeW(&devInst, devId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+        return false;
+
+    ULONG status = 0, problem = 0;
+    if (CM_Get_DevNode_Status(&status, &problem, devInst, 0) != CR_SUCCESS) return false;
+    return problem != 0;  // 19 = CM_PROB_REGISTRY（半残特征）
+}
+
+// 查 ROOT\PawnIO 设备节点是否存在以及是否处于故障态
+static bool QueryPawnIoDeviceNode(bool& hasProblem) {
+    hasProblem = false;
+
+    HDEVINFO hPresent = SetupDiGetClassDevsW(&kPawnIoClassGuid, nullptr, nullptr,
+                                              DIGCF_PRESENT);
+    if (hPresent == INVALID_HANDLE_VALUE) return false;
+    const bool present = FindPawnIoInDevList(hPresent, nullptr);
+    SetupDiDestroyDeviceInfoList(hPresent);
+    if (!present) return false;
+
+    hasProblem = QueryPawnIoProblemCode();
+    return true;
+}
+
+PawnIo::DriverState PawnIo::QueryDriverState() {
+    const bool svc = QueryPawnIoService();
+    bool devProblem = false;
+    const bool dev = QueryPawnIoDeviceNode(devProblem);
+
+    if (svc && dev && !devProblem) return DriverState::Installed;
+    if (dev || svc) return DriverState::Corrupted;
+    return DriverState::Missing;
+}
+
+bool PawnIo::IsDriverInstalled() {
+    return QueryDriverState() == DriverState::Installed;
+}
+
+// ===================== 驱动残留清理 =====================
+
+// 安装完成后收尾：等待服务键与设备就绪（声明，实现见文件后部）
+static bool FinalizeInstall();
+
+// 枚举 C:\Windows\INF\oem*.inf，找出认领 Root\PawnIO 的那些（正常只有一个）
+static std::vector<std::wstring> FindPawnIoOemInfs() {
+    std::vector<std::wstring> found;
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW(L"C:\\Windows\\INF\\oem*.inf", &fd);
+    if (h == INVALID_HANDLE_VALUE) return found;
+
+    do {
+        const std::wstring full = std::wstring(L"C:\\Windows\\INF\\") + fd.cFileName;
+        HANDLE f = CreateFileW(full.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        LARGE_INTEGER sz = {};
+        GetFileSizeEx(f, &sz);
+        if (sz.QuadPart > 0 && sz.QuadPart < 1024 * 1024) {
+            std::string text((size_t)sz.QuadPart, '\0');
+            DWORD read = 0;
+            if (ReadFile(f, text.data(), (DWORD)sz.QuadPart, &read, nullptr) && read > 0) {
+                text.resize(read);
+                if (text.find("Root\\PawnIO") != std::string::npos)
+                    found.push_back(fd.cFileName);
+            }
+        }
+        CloseHandle(f);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+bool PawnIo::PurgeDriver() {
+    // 前置：必须先完全释放设备占用，否则文件删不掉、服务停不了
+    Instance().Shutdown();
+    Sleep(300);
+
+    // ① 删除 DriverStore 里的驱动包（连带移除设备节点与 Class 绑定）
+    for (const auto& inf : FindPawnIoOemInfs()) {
+        wchar_t sysDir[MAX_PATH] = {};
+        if (!GetSystemDirectoryW(sysDir, MAX_PATH)) continue;
+        const std::wstring tool = std::wstring(sysDir) + L"\\pnputil.exe";
+        const std::wstring args = L"/delete-driver " + inf + L" /uninstall /force";
+
+        SHELLEXECUTEINFOW sei = {};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+        sei.lpVerb = L"open";
+        sei.lpFile = tool.c_str();
+        sei.lpParameters = args.c_str();
+        sei.nShow = SW_HIDE;
+        if (ShellExecuteExW(&sei) && sei.hProcess) {
+            WaitForSingleObject(sei.hProcess, 15000);
+            CloseHandle(sei.hProcess);
+        }
+    }
+
+    // ② 删除残留服务键（pnputil 正常会清，但半残状态下可能留下）
+    RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
+                    L"SYSTEM\\CurrentControlSet\\Services\\PawnIO", KEY_WOW64_64KEY, 0);
+
+    // ③ 删除卸载注册表项 —— 关键：没有它，安装器会误判「已安装」而走更新分支
+    RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
+                    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\PawnIO",
+                    KEY_WOW64_64KEY, 0);
+    RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
+                    L"SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\PawnIO",
+                    KEY_WOW64_64KEY, 0);
+
+    Sleep(500);
+    // 清理后应回到完全未安装状态
+    return QueryDriverState() == DriverState::Missing;
+}
+
+bool PawnIo::RecoverDriverEmbedded(bool repairBroken) {
+    // 探测式深度清理：只在命中半残状态时才清，避免每次重装都无谓地删驱动包
+    if (repairBroken && QueryDriverState() == DriverState::Corrupted) {
+        PurgeDriver();
+    }
+
     // 从 EXE 资源提取安装器
     HRSRC hRes = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_PAWNIO_SETUP), RT_RCDATA);
     if (!hRes) return false;
@@ -417,10 +600,25 @@ bool PawnIo::RecoverDriverEmbedded() {
     DeleteFileW(exePath.c_str());
     DeleteFileW(tempFile);
 
-    return IsDriverInstalled();
+    return FinalizeInstall();
 }
 
-bool PawnIo::RecoverDriverNetwork() {
+// 安装完成后收尾：驱动刚落地时 PnP 需要一点时间创建服务键，
+// 立即检查会误判为失败，故轮询等待。
+static bool FinalizeInstall() {
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        if (PawnIo::QueryDriverState() == PawnIo::DriverState::Installed) return true;
+        Sleep(500);
+    }
+    // 至少不再是 Missing 就算部分成功（驱动在但设备待重启刷新）
+    return PawnIo::QueryDriverState() != PawnIo::DriverState::Missing;
+}
+
+bool PawnIo::RecoverDriverNetwork(bool repairBroken) {
+    if (repairBroken && QueryDriverState() == DriverState::Corrupted) {
+        PurgeDriver();
+    }
+
     // 使用 WinHTTP 从 GitHub 下载最新安装器
     HINTERNET hSession = WinHttpOpen(L"TaskbarStudio/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -531,5 +729,5 @@ bool PawnIo::RecoverDriverNetwork() {
     DeleteFileW(exePath.c_str());
     DeleteFileW(tempFile);
 
-    return IsDriverInstalled();
+    return FinalizeInstall();
 }
