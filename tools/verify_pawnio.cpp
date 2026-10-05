@@ -47,9 +47,10 @@ static bool FindInDevList(HDEVINFO h, std::wstring* devId) {
             DWORD sz = 0;
             SetupDiGetDeviceInstanceIdW(h, &di, nullptr, 0, &sz);
             if (sz) {
-                std::vector<BYTE> b(sz, 0);
-                if (SetupDiGetDeviceInstanceIdW(h, &di, (PWSTR)b.data(), sz, nullptr))
-                    *devId = (LPCWSTR)b.data();
+                // sz 单位是「字符」；用 BYTE 数组会少分配一半 → 堆越界写
+                std::vector<wchar_t> b(sz, L'\0');
+                if (SetupDiGetDeviceInstanceIdW(h, &di, b.data(), sz, nullptr))
+                    *devId = b.data();
             }
         }
         return true;

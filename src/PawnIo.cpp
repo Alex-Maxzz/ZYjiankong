@@ -414,13 +414,16 @@ static bool FindPawnIoInDevList(HDEVINFO hDevInfo, std::wstring* devInstIdOut) {
         if (id.find(L"Root\\PawnIO") == std::wstring::npos) continue;
 
         if (devInstIdOut) {
-            DWORD idSize = 0;
-            SetupDiGetDeviceInstanceIdW(hDevInfo, &devInfo, nullptr, 0, &idSize);
-            if (idSize > 0) {
-                std::vector<BYTE> idBuf(idSize, 0);
-                if (SetupDiGetDeviceInstanceIdW(hDevInfo, &devInfo, (PWSTR)idBuf.data(),
-                                               idSize, nullptr))
-                    *devInstIdOut = (LPCWSTR)idBuf.data();
+            DWORD idChars = 0;
+            SetupDiGetDeviceInstanceIdW(hDevInfo, &devInfo, nullptr, 0, &idChars);
+            if (idChars > 0) {
+                // 重要：SetupDi 字符串 API 的尺寸单位是「字符」，不是字节。
+                // 之前用 std::vector<BYTE>(idChars) 只分配了 idChars 个字节，
+                // 而宽字符串需要 idChars*2 字节，导致堆越界写 → 0xC0000374 堆损坏。
+                // 表现为：切到设置面板「驱动」页即崩溃（该函数只在设备节点存在时执行）。
+                std::vector<wchar_t> idBuf(idChars, L'\0');
+                if (SetupDiGetDeviceInstanceIdW(hDevInfo, &devInfo, idBuf.data(), idChars, nullptr))
+                    *devInstIdOut = idBuf.data();
             }
         }
         return true;

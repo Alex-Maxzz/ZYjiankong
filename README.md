@@ -94,6 +94,41 @@ cmake --build build --config Release
 
 ---
 
+## 🧪 自动化验收
+
+程序崩溃后没日志可查是最难查的问题之一。为此本仓库提供两套可复跑的验收工具，
+以及程序内置的崩溃取证，避免「靠猜」。
+
+```bash
+# 1) 构建验收工具（默认不构建）
+cmake -S . -B build -DBUILD_VERIFY_TOOL=ON -DBUILD_UI_TEST=ON
+cmake --build build --config Release --target verify_pawnio test_settings_crash TaskbarStudio_uitest
+
+# 2) 驱动状态检测（只读，在「半残」机器上应报 Corrupted）
+build/Release/verify_pawnio.exe
+
+# 3) 设置面板端到端验收：自动拉起程序 → 逐个切 Tab → 反复切换 → 点两个重装按钮
+#    任何一步进程/窗口死亡即 FAIL，并打印被测程序写的崩溃日志
+build/Release/test_settings_crash.exe
+```
+
+**为什么需要 `TaskbarStudio_uitest.exe`**：正式版清单是 `requireAdministrator`，
+非提权进程无法 `CreateProcess` 拉起它（错误 740），自动化脚本就永远拉不起被测程序。
+该验收构建与正式版**同一份源码**，唯一差别是清单为 `asInvoker`。
+
+**崩溃取证**：程序启动即安装未处理异常捕获（`src/CrashLog.cpp`），崩溃后写入
+
+| 文件 | 内容 |
+| --- | --- |
+| `%TEMP%\ts_crash.log` | 异常码释义、故障模块 + 模块内偏移、调用栈、访问违规详情 |
+| `%TEMP%\ts_crash_*.dmp` | minidump，可用 WinDbg / VS 打开 |
+
+> 本机 `HKLM\...\Windows Error Reporting\Disabled=1`（WER 关闭）时，
+> 系统不会留下任何崩溃事件或报告，此时只能依赖上述自建日志。
+> 注意：堆损坏（`0xC0000374`）由 `__fastfail` 上抛，会绕过 SEH 过滤器，**不会**留下日志。
+
+---
+
 ## 🚀 运行
 
 1. **以管理员身份运行** `TaskbarStudio.exe`（推荐右键 → 以管理员身份运行）
@@ -120,6 +155,7 @@ main.cpp            程序入口：单实例、托盘、菜单、计时器、全
 ├─ OverlayWindow   DirectComposition + Direct2D + DirectWrite 透明悬浮窗
 ├─ FullscreenDetect 前台全屏窗口检测（自动隐藏）
 ├─ SettingsDialog   设置窗口（实时预览）
+├─ CrashLog         未处理异常捕获（日志 + minidump）
 └─ AppConfig        配置加载 / 保存（JSON，%APPDATA%）
 ```
 

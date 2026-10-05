@@ -59,6 +59,8 @@ static int g_tab = 0;
 static bool g_drag = false;
 static int g_dragId = 0;
 static ID2D1Bitmap* g_hueRing = nullptr;  // 色盘位图
+static ID2D1Factory* g_d2dFactory = nullptr;  // 窗口存活期复用，设备丢失时用它重建渲染目标
+static UINT g_dpi = 96;                       // 当前窗口 DPI，重建渲染目标时复用
 
 // 预创建复用画刷（避免每帧 Create/Release 导致内存增长）
 static ID2D1SolidColorBrush* g_brWhite = nullptr;
@@ -405,6 +407,9 @@ static bool g_driverBusy = false;
 static PawnIo::DriverState g_driverState = PawnIo::DriverState::Missing;
 static bool g_driverStateValid = false;
 
+// 驱动恢复工作线程 → UI 线程的结果回传消息（避免跨线程写 std::wstring）
+static const UINT kMsgDriverDone = WM_APP + 20;
+
 // 在非渲染路径刷新驱动状态缓存
 static void RefreshDriverState() {
     g_driverState = PawnIo::QueryDriverState();
@@ -459,6 +464,39 @@ static void PageDriver(float y) {
     }
 }
 
+// ===================== 设备资源（设备丢失后可重建） =====================
+// 释放所有依赖 D2D 渲染目标的资源；文本格式与 DWrite 工厂不依赖设备，不在此释放。
+static void DiscardDeviceResources() {
+    if (g_brWhite) { g_brWhite->Release(); g_brWhite = nullptr; }
+    if (g_brBlack) { g_brBlack->Release(); g_brBlack = nullptr; }
+    if (g_brTmp)   { g_brTmp->Release();   g_brTmp   = nullptr; }
+    if (g_hueRing) { g_hueRing->Release(); g_hueRing = nullptr; }
+    if (g_rt)      { g_rt->Release();      g_rt      = nullptr; }
+}
+
+// 依据当前窗口尺寸重建渲染目标与复用画刷（g_hueRing 由 PageColor 按需重建）
+static bool CreateDeviceResources() {
+    if (!g_d2dFactory || !g_hwnd) return false;
+    RECT rc{};
+    GetClientRect(g_hwnd, &rc);
+    if (rc.right <= 0 || rc.bottom <= 0) return false;
+
+    D2D1_RENDER_TARGET_PROPERTIES rtp = D2D1::RenderTargetProperties();
+    rtp.dpiX = (float)g_dpi;
+    rtp.dpiY = (float)g_dpi;
+    g_rt = nullptr;
+    if (FAILED(g_d2dFactory->CreateHwndRenderTarget(
+            rtp, D2D1::HwndRenderTargetProperties(g_hwnd, D2D1::SizeU(rc.right, rc.bottom)), &g_rt))
+        || !g_rt) {
+        g_rt = nullptr;
+        return false;
+    }
+    if (!g_brWhite) g_rt->CreateSolidColorBrush(C(0xFFFFFFFF), &g_brWhite);
+    if (!g_brBlack) g_rt->CreateSolidColorBrush(C(0xFF000000), &g_brBlack);
+    if (!g_brTmp)   g_rt->CreateSolidColorBrush(C(0xFFFFFFFF), &g_brTmp);
+    return g_brTmp != nullptr;
+}
+
 // ===================== 主渲染 =====================
 static void Render() {
     if (!g_rt) return;
@@ -503,7 +541,14 @@ static void Render() {
         case TAB_DRIVER: PageDriver(cy); break;
     }
 
-    g_rt->EndDraw();
+    const HRESULT hrDraw = g_rt->EndDraw();
+    if (hrDraw == D2DERR_RECREATE_TARGET) {
+        // 设备丢失（GPU 重置、显示模式/DPI 变化、DWM 状态切换）。
+        // 必须丢弃并重建渲染目标，否则后续绘制都作用在已失效对象上，
+        // 表现为窗口「点一下就没反应/整个进程消失」。
+        DiscardDeviceResources();
+        if (CreateDeviceResources() && g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+    }
 }
 
 // ===================== 配置应用 =====================
@@ -565,33 +610,36 @@ static void Click(int id) {
         g_driverMsg = id == 700 ? L"正在从本地资源恢复..." : L"正在从网络下载...";
         if (wasCorrupted) g_driverMsg = L"检测到残留，正在清理后重装...";
         InvalidateRect(g_hwnd, nullptr, FALSE);
-        bool useNetwork = (id == 701);
-        std::thread([useNetwork, wasCorrupted]() {
+        HWND target = g_hwnd;
+        const bool useNetwork = (id == 701);
+        std::thread([target, useNetwork, wasCorrupted]() {
             // repairBroken=true：半残状态下自动深度清理（删驱动包+服务键+卸载项）再重装
-            bool ok = useNetwork ? PawnIo::RecoverDriverNetwork(true)
-                                 : PawnIo::RecoverDriverEmbedded(true);
+            std::wstring msg;
+            const bool ok = useNetwork ? PawnIo::RecoverDriverNetwork(true)
+                                       : PawnIo::RecoverDriverEmbedded(true);
             if (ok) {
                 PawnIo::Instance().Reinit();
                 if (PawnIo::Instance().IsAvailable()) {
-                    g_driverMsg = wasCorrupted ? L"残留已清理，驱动重装成功"
-                                              : L"驱动已恢复，CPU 温度可正常读取";
+                    msg = wasCorrupted ? L"残留已清理，驱动重装成功"
+                                       : L"驱动已恢复，CPU 温度可正常读取";
                 } else {
-                    g_driverMsg = L"驱动已安装，但初始化失败（尝试重启程序）";
+                    msg = L"驱动已安装，但初始化失败（尝试重启程序）";
                 }
             } else {
                 // 失败时区分是清理失败还是安装失败，便于用户判断
                 if (PawnIo::QueryDriverState() == PawnIo::DriverState::Corrupted) {
-                    g_driverMsg = L"清理残留失败，请以管理员身份运行后重试";
+                    msg = L"清理残留失败，请以管理员身份运行后重试";
                 } else {
-                    g_driverMsg = useNetwork ? L"网络下载失败，请检查网络后重试"
-                                            : L"本地恢复失败，请尝试网络下载";
+                    msg = useNetwork ? L"网络下载失败，请检查网络后重试"
+                                     : L"本地恢复失败，请尝试网络下载";
                 }
             }
-            g_driverBusy = false;
-            if (g_hwnd) {
-                // 修复完成后同步缓存，下一次重绘直接读缓存，不再进 PnP API
-                g_driverState = PawnIo::QueryDriverState();
-                InvalidateRect(g_hwnd, nullptr, FALSE);
+            // 关键：g_driverMsg/g_driverState/g_driverBusy 只允许 UI 线程读写。
+            // 直接从工作线程写 std::wstring 会与渲染线程并发访问同一对象，
+            // 属于未定义行为（堆损坏 → WndProc 内崩溃）。故结果打包回 UI 线程。
+            if (target && IsWindow(target)) {
+                PostMessageW(target, kMsgDriverDone, 0,
+                             reinterpret_cast<LPARAM>(new std::wstring(std::move(msg))));
             }
         }).detach();
         return;
@@ -656,6 +704,15 @@ static void LoadFonts() {
 // ===================== 窗口过程 =====================
 static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case kMsgDriverDone: {
+            // 工作线程把结果回传到这里，由 UI 线程统一改状态
+            std::unique_ptr<std::wstring> p(reinterpret_cast<std::wstring*>(lp));
+            if (p) g_driverMsg = std::move(*p);
+            g_driverBusy = false;
+            RefreshDriverState();   // 修复后重新取一次真实状态
+            InvalidateRect(hw, nullptr, FALSE);
+            return 0;
+        }
         case WM_PAINT: { PAINTSTRUCT ps; BeginPaint(hw,&ps); Render(); EndPaint(hw,&ps); return 0; }
         case WM_LBUTTONDOWN: {
             float mx=(float)LOWORD(lp)/g_dpiScale, my=(float)HIWORD(lp)/g_dpiScale;
@@ -689,15 +746,12 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_CLOSE: SettingsDialog::Close(); return 0;
         case WM_DESTROY:
-            if (g_brWhite) { g_brWhite->Release(); g_brWhite=nullptr; }
-            if (g_brBlack) { g_brBlack->Release(); g_brBlack=nullptr; }
-            if (g_brTmp)   { g_brTmp->Release();   g_brTmp=nullptr; }
-            if (g_hueRing) { g_hueRing->Release(); g_hueRing=nullptr; }
-            if (g_rt) { g_rt->Release(); g_rt=nullptr; }
+            DiscardDeviceResources();
             if (g_f12) { g_f12->Release(); g_f12=nullptr; }
             if (g_f11) { g_f11->Release(); g_f11=nullptr; }
             if (g_f13) { g_f13->Release(); g_f13=nullptr; }
             if (g_dw) { g_dw->Release(); g_dw=nullptr; }
+            if (g_d2dFactory) { g_d2dFactory->Release(); g_d2dFactory=nullptr; }
             g_hwnd = nullptr; return 0;
         default: return DefWindowProcW(hw, msg, wp, lp);
     }
@@ -733,30 +787,18 @@ void SettingsDialog::Show(HWND owner) {
     MARGINS m = {1,1,1,1};
     DwmExtendFrameIntoClientArea(g_hwnd, &m);
 
-    // D2D
-    ID2D1Factory* fac=nullptr;
-    D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &fac);
-    RECT rc; GetClientRect(g_hwnd, &rc);
-    D2D1_RENDER_TARGET_PROPERTIES rtp = D2D1::RenderTargetProperties();
-    rtp.dpiX = (float)dpi;
-    rtp.dpiY = (float)dpi;
-    fac->CreateHwndRenderTarget(rtp,
-        D2D1::HwndRenderTargetProperties(g_hwnd, D2D1::SizeU(rc.right,rc.bottom)), &g_rt);
-    fac->Release();
+    // D2D（工厂窗口存活期复用；设备丢失时依靠它重建渲染目标）
+    if (!g_d2dFactory) D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2dFactory);
+    g_dpi = dpi;
+    CreateDeviceResources();
 
-    // 初始化复用画刷（避免每帧 Create/Release 导致内存增长）
-    if (g_rt) {
-        if (!g_brWhite) g_rt->CreateSolidColorBrush(C(0xFFFFFFFF), &g_brWhite);
-        if (!g_brBlack) g_rt->CreateSolidColorBrush(C(0xFF000000), &g_brBlack);
-        if (!g_brTmp)   g_rt->CreateSolidColorBrush(C(0xFFFFFFFF), &g_brTmp);
-    }
-
-    // DWrite
-    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), (IUnknown**)&g_dw);
+    // DWrite（与设备无关，只需创建一次）
+    if (!g_dw)
+        DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), (IUnknown**)&g_dw);
     if (g_dw) {
-        g_dw->CreateTextFormat(L"Inter",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,12.f,L"zh-CN",&g_f12);
-        g_dw->CreateTextFormat(L"Inter",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,11.f,L"zh-CN",&g_f11);
-        g_dw->CreateTextFormat(L"Inter",nullptr,DWRITE_FONT_WEIGHT_MEDIUM,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,13.f,L"zh-CN",&g_f13);
+        if (!g_f12) g_dw->CreateTextFormat(L"Inter",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,12.f,L"zh-CN",&g_f12);
+        if (!g_f11) g_dw->CreateTextFormat(L"Inter",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,11.f,L"zh-CN",&g_f11);
+        if (!g_f13) g_dw->CreateTextFormat(L"Inter",nullptr,DWRITE_FONT_WEIGHT_MEDIUM,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,13.f,L"zh-CN",&g_f13);
     }
     LoadFonts();
     g_fontListOpen = false; g_fontScroll = 0;

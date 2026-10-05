@@ -11,4 +11,10 @@
 201 RCDATA "PawnIO_setup.exe"
 
 // 应用清单：请求管理员权限（PawnIO 驱动需要 admin）+ Per-Monitor DPI
+// 自动化 UI 验收构建（CMake 选项 BUILD_UI_TEST，定义 TS_UI_TEST_MANIFEST）
+// 改挂 asInvoker 清单：提权清单会让非提权进程无法拉起被测程序（错误 740）。
+#ifdef TS_UI_TEST_MANIFEST
+1 24 "app_asinvoker.manifest"
+#else
 1 24 "app.manifest"
+#endif

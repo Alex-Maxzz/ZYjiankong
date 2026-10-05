@@ -5,6 +5,7 @@
 #include "AppConfig.h"
 #include "FullscreenDetect.h"
 #include "SettingsDialog.h"
+#include "CrashLog.h"
 
 #include <shellapi.h>
 #include <commctrl.h>
@@ -14,6 +15,7 @@
 
 static const wchar_t* kAppTitle       = L"TaskbarStudio";
 static const UINT     kTaskbarIconMsg = WM_APP + 1;
+static const UINT     kOpenSettingsMsg = WM_APP + 100;  // --settings 启动参数触发
 static const UINT     kTimerRefresh   = 1001;  // 1s 刷新数据
 static const UINT     kTimerFsCheck   = 1002;  // 500ms 检查全屏
 static const UINT     kTrayId         = 1000;
@@ -232,6 +234,9 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case kTaskbarIconMsg:
             if (lp == WM_RBUTTONUP) ShowContextMenu(hwnd);
             return 0;
+        case kOpenSettingsMsg:   // --settings 启动参数触发，等价于点托盘菜单「设置」
+            SettingsDialog::Show(hwnd);
+            return 0;
         case WM_COMMAND: {
             UINT id = LOWORD(wp);
             switch (id) {
@@ -339,6 +344,10 @@ static LRESULT CALLBACK HiddenWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 // ===================== 主入口 =====================
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR cmdLine, int) {
+    // 最早安装崩溃捕获：本机 WER 已关闭，进程崩了不会有任何系统日志，
+    // 必须靠自建日志(%TEMP%\ts_crash.log) + minidump 才能定位。
+    CrashLog::Install();
+
     // 单实例保护：已运行则直接退出
     HANDLE hSingle = CreateMutexW(nullptr, TRUE, L"TaskbarStudio_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -348,6 +357,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR cmdLine, int) {
 
     // --silent 参数：开机静默启动
     bool silent = (cmdLine && wcsstr(cmdLine, L"--silent") != nullptr);
+    // --settings 参数：启动后直接打开设置面板（调试 / 自动化验收用）
+    const bool openSettings = (cmdLine && wcsstr(cmdLine, L"--settings") != nullptr);
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
@@ -415,6 +426,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR cmdLine, int) {
     AddTrayIcon(hwnd);
     SetTimer(hwnd, kTimerRefresh, 1000, nullptr);
     SetTimer(hwnd, kTimerFsCheck, 500, nullptr);
+
+    // 直接打开设置面板（消息循环启动后处理，确保 UI 线程状态就绪）
+    if (openSettings) PostMessageW(hwnd, kOpenSettingsMsg, 0, 0);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
