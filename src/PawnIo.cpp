@@ -31,6 +31,7 @@ PawnIo::~PawnIo() {
 
 bool PawnIo::Init() {
     if (m_available) return true;
+    std::lock_guard<std::recursive_mutex> lk(m_handleMutex);
 
     // 动态加载 PawnIOLib.dll
     m_hLib = LoadLibraryW(L"C:\\Program Files\\PawnIO\\PawnIOLib.dll");
@@ -54,10 +55,12 @@ bool PawnIo::Init() {
     // 打开 PawnIO 设备（需要管理员权限）
     HRESULT hr = m_fnOpen(&m_handle);
     if (FAILED(hr) || !m_handle) {
-        // 驱动缺失或处于半残状态（设备在、服务/sys 被删），尝试自动恢复。
-        // RecoverDriverEmbedded 内部会探测半残状态并先深度清理再重装。
-        if (QueryDriverState() != DriverState::Installed) {
-            RecoverDriverEmbedded();
+        // 驱动缺失或半残（设备在、服务/sys 被删）。
+        // 此处只做「全新安装」，不做深度清理：清理会 FreeLibrary(m_hLib)，
+        // 而下面还要继续用已取出的函数指针，释放后调用即为崩溃。
+        // 半残状态的深度清理由设置面板的修复按钮走PurgeDriver() + Reinit() 完成。
+        if (QueryDriverState() == DriverState::Missing) {
+            RecoverDriverEmbedded(/*repairBroken=*/false);
         }
         // 重试打开
         hr = m_fnOpen(&m_handle);
@@ -91,6 +94,7 @@ bool PawnIo::Init() {
 }
 
 void PawnIo::Shutdown() {
+    std::lock_guard<std::recursive_mutex> lk(m_handleMutex);
     if (m_handle && m_fnClose) {
         m_fnClose(m_handle);
         m_handle = nullptr;
@@ -253,6 +257,10 @@ bool PawnIo::UpdateAndReadPmTable() {
 }
 
 float PawnIo::ReadCpuTemperature() {
+    // 整个采集流程串行化：设置面板可能在另一线程触发 PurgeDriver/Reinit，
+    // 那里会关闭句柄并释放 PawnIOLib.dll
+    std::lock_guard<std::recursive_mutex> lk(m_handleMutex);
+
     if (!m_available) {
         // 驱动不可用时，定期尝试重连（每 30 秒一次）
         if (m_reinitCooldown > 0) {
@@ -322,9 +330,13 @@ float PawnIo::ReadCpuTemperature() {
 }
 
 bool PawnIo::Reinit() {
-    Shutdown();
+    {
+        std::lock_guard<std::recursive_mutex> lk(m_handleMutex);
+        Shutdown();
+    }
     Sleep(200);  // 给驱动一点时间释放资源
-    bool ok = Init();
+    bool ok = Init();  // Init 内部自行加锁（recursive，可重入）
+    std::lock_guard<std::recursive_mutex> lk(m_handleMutex);
     if (ok) {
         m_staleCount = 0;
         m_lastChecksum = 0;
@@ -503,8 +515,13 @@ static std::vector<std::wstring> FindPawnIoOemInfs() {
 }
 
 bool PawnIo::PurgeDriver() {
-    // 前置：必须先完全释放设备占用，否则文件删不掉、服务停不了
-    Instance().Shutdown();
+    // 释放设备占用，否则文件删不掉、服务停不了。
+    // 必须在 Init() 之外调用：Init() 期间 m_hLib 正被使用，
+    // 此时 FreeLibrary 会让 Init 后续调用已卸载 DLL 的函数指针。
+    {
+        std::lock_guard<std::recursive_mutex> lk(Instance().m_handleMutex);
+        Instance().Shutdown();
+    }
     Sleep(300);
 
     // ① 删除 DriverStore 里的驱动包（连带移除设备节点与 Class 绑定）

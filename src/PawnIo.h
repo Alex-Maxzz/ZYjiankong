@@ -32,6 +32,7 @@ public:
     // 清理 PawnIO 驱动残留（删除 DriverStore 包 + 服务键 + 卸载注册表项）。
     // 用于「深度修复」：安装器遇到半残状态会走进更新分支而失败，必须先清干净。
     // 需要管理员权限。成功返回 true。
+    // 注意：会先请求关闭设备句柄，调用方需确保不在数据采集路径上调用。
     static bool PurgeDriver();
 
     // 从内嵌资源恢复驱动（静默安装），成功返回 true
@@ -91,4 +92,11 @@ private:
     int              m_staleCount{0};
     static constexpr int kStaleMax = 10;  // 连续 10 次读数完全相同 → 重连
     int              m_reinitCooldown{0}; // 重连失败后的冷却计数（避免每秒重试）
+
+    // 保护设备句柄与库句柄的生命周期。
+    // 采集线程（ReadCpuTemperature → Reinit）与设置面板线程
+    // （RecoverDriver* → PurgeDriver）会并发触碰这些状态，必须串行化。
+    // 用 recursive：Init() 内部会调RecoverDriverEmbedded()，
+    // 后者在半残时又会走 PurgeDriver()，存在同线程重入路径。
+    std::recursive_mutex m_handleMutex;
 };
